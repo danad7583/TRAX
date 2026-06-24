@@ -1,27 +1,42 @@
-
 //! Simulate Agent A ↔ Agent B scenario per TRAX v1.1.0
 use rand_core::OsRng;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
 use trax::session::derive_session_id;
 use trax::crypto::hash32;
-use coset::{CoseSign1, Header, iana};
+use coset::{CborSerializable, CoseSign1, Header, ProtectedHeader, Algorithm, iana};
 
 fn sign_cose(sk: &SigningKey, payload: &[u8]) -> Vec<u8> {
-    let mut protected = Header::new();
-    protected.alg = Some(iana::Algorithm::EdDSA.into());
-    let protected = protected.to_protected().unwrap();
-    let mut s1 = CoseSign1{ protected, unprotected: Header::new(), payload: Some(payload.to_vec()), signature: vec![] };
-    s1.sign(|m| sk.sign(m).to_vec()).expect("sign");
-    let mut out = vec![]; s1.to_writer(&mut out).unwrap(); out
+    let mut header = Header::default();
+    header.alg = Some(Algorithm::Assigned(iana::Algorithm::EdDSA));
+
+    let signature = sk.sign(payload).to_bytes().to_vec();
+    let sign1 = CoseSign1 {
+        protected: ProtectedHeader {
+            original_data: None,
+            header,
+        },
+        unprotected: Header::default(),
+        payload: Some(payload.to_vec()),
+        signature,
+    };
+
+    sign1.to_vec().expect("serialize cose")
 }
 
 fn verify_cose(vk: &VerifyingKey, bytes: &[u8]) -> bool {
-    if let Ok(s1) = CoseSign1::from_slice(bytes) {
-        if let Some(_payload) = s1.payload.as_ref() {
-            return s1.verify(|m, sig| vk.verify(m, &ed25519_dalek::Signature::from_slice(sig).unwrap()).map(|_| ()).map_err(|_| coset::CoseError::Verification)).is_ok();
-        }
-    }
-    false
+    let Ok(sign1) = CoseSign1::from_slice(bytes) else {
+        return false;
+    };
+
+    let Some(payload) = sign1.payload.as_ref() else {
+        return false;
+    };
+
+    let Ok(signature) = Signature::from_slice(&sign1.signature) else {
+        return false;
+    };
+
+    vk.verify(payload, &signature).is_ok()
 }
 
 fn main() {
@@ -34,7 +49,7 @@ fn main() {
     let sk_a = SigningKey::generate(&mut OsRng);
     let vk_a = sk_a.verifying_key();
     let sk_b = SigningKey::generate(&mut OsRng);
-    let vk_b = sk_b.verifying_key();
+    let _vk_b = sk_b.verifying_key();
 
     let payload1 = b"{\"msg\":\"hello B\",\"counter\":1}";
     let env1 = sign_cose(&sk_a, payload1);
