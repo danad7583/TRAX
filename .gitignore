@@ -1,0 +1,43 @@
+# Rust build output
+/target/
+
+# Cargo lock
+# Keep Cargo.lock for binaries/apps.
+# For libraries, this is optional. TRAX is a library, so either choice is acceptable.
+# Cargo.lock
+
+# Generated benchmark output
+/criterion/
+
+# Generated vectors/output artifacts
+/vectors/generated/
+
+# Environment/config secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+
+# VS Code local workspace settings
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# Windows/MSVC artifacts
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Temporary files
+*.tmp
+*.bak
+*.swp

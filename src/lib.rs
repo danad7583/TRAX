@@ -1,8 +1,8 @@
-//! AAICP v1.1.0 Core Library
+//! TRAX v1.1.0 Core Library
 //!
 //! Implements canonical encoding (CBOR+COSE_Sign1), handshake/session binding,
 //! DAG node + segment proofs, key rotation/quarantine, replay protection, and
-//! rate limiting per the AAICP RFC v1.1.0.
+//! rate limiting per the TRAX RFC v1.1.0.
 //!
 //! NOTE: Some parts are reference implementations; tune for your threat model.
 
@@ -17,4 +17,4 @@ pub mod rate;
 pub mod errors;
 
 pub use types::*;
-pub use errors::AaicpError;
+pub use errors::TraxError;

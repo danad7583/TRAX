@@ -1,4 +1,4 @@
-use aaicp_core::crypto::{ed25519_sign, ed25519_sign_batch_k8};
+use trax::crypto::{ed25519_sign, ed25519_sign_batch_k8};
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::time::Instant;

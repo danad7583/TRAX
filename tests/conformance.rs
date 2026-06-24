@@ -1,5 +1,5 @@
 // Conformance tests mapped to requirement IDs.
-use aaicp_core::*;
+use trax::*;
 mod vectors;
 use vectors::load_vector;
 

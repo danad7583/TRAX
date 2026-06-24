@@ -1,10 +1,10 @@
 
 services:
-  aaicp:
+  trax:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: aaicp-core:dev
+    image: trax-core:dev
     environment:
       - MODE=aaip_scenario
     volumes:

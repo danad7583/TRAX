@@ -4,7 +4,7 @@
 FROM rust:1.81 AS builder
 
 # Set workdir
-WORKDIR /usr/src/aaicp-core
+WORKDIR /usr/src/trax
 
 # Copy all project files
 COPY . .
@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/
 WORKDIR /app
 
 # Copy built binary from builder stage
-COPY --from=builder /usr/src/aaicp-core/target/release/examples/aaip_scenario /app/aaip_scenario
+COPY --from=builder /usr/src/trax/target/release/examples/aaip_scenario /app/aaip_scenario
 
 # Set default command to run scenario
 CMD ["./aaip_scenario"]

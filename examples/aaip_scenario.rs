@@ -1,9 +1,9 @@
 
-//! Simulate Agent A ↔ Agent B scenario per AAICP v1.1.0
+//! Simulate Agent A ↔ Agent B scenario per TRAX v1.1.0
 use rand_core::OsRng;
 use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
-use aaicp_core::session::derive_session_id;
-use aaicp_core::crypto::hash32;
+use trax::session::derive_session_id;
+use trax::crypto::hash32;
 use coset::{CoseSign1, Header, iana};
 
 fn sign_cose(sk: &SigningKey, payload: &[u8]) -> Vec<u8> {
@@ -27,7 +27,7 @@ fn verify_cose(vk: &VerifyingKey, bytes: &[u8]) -> bool {
 fn main() {
     let nonce_a = b"nonce_A_32_bytes________________";
     let nonce_b = b"nonce_B_32_bytes________________";
-    let context = b"aaicp:demo";
+    let context = b"trax:demo";
     let session_id = derive_session_id(context, nonce_a, nonce_b, None);
     println!("session_id={:02x?}", session_id);
 

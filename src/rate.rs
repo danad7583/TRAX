@@ -1,5 +1,5 @@
 //! Token-bucket rate limiter per §8.2
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub struct TokenBucket {
     capacity: u64,

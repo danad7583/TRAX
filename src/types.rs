@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtectedHeaders {
     pub aaip_ver: String,
-    pub aaicp_ver: String,
+    pub trax_ver: String,
     pub alg: String,
     pub kid: Vec<u8>,
     pub msg_type: String,

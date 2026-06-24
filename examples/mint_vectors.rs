@@ -1,5 +1,5 @@
 
-//! Generate Ed25519 keypairs and COSE_Sign1 vectors matching AAICP v1.1.0.
+//! Generate Ed25519 keypairs and COSE_Sign1 vectors matching TRAX v1.1.0.
 //! Usage:
 //!   cargo run --example mint_vectors --features crypto-ed25519,hash-blake3
 //! Outputs raw binary vectors into ./vectors/generated/*

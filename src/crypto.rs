@@ -1,5 +1,4 @@
 //! Crypto profile: Ed25519 (sig), optional X25519 (ECDH), BLAKE3 or SHA-512/256, HKDF.
-use thiserror::Error;
 
 #[cfg(feature = "crypto-ed25519")]
 use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
@@ -7,7 +6,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey, Signature, Signer, Verifier};
 #[cfg(feature = "hash-blake3")]
 pub fn hash32(data: &[u8]) -> [u8;32] { blake3::hash(data).into() }
 
-#[cfg(all(not(feature = "hash-blake3"), feature = "hash-sha512_256"))]
+#[cfg(all(not(feature = "hash-blake3"), feature = "hash-sha2"))]
 pub fn hash32(data: &[u8]) -> [u8;32] {
     #[cfg(feature = "hash-sha2")]
     use sha2::{Digest, Sha512_256};
@@ -21,7 +20,6 @@ pub fn hash32(data: &[u8]) -> [u8;32] {
 
 pub fn hkdf_extract_expand(salt: &[u8], ikm: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
     use hkdf::Hkdf;
-    #[cfg(feature = "hash-sha2")]
     use sha2::Sha512;
     let hk = Hkdf::<Sha512>::new(Some(salt), ikm);
     let mut okm = vec![0u8; out_len];

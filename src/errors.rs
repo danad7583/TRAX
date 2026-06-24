@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum AaicpError {
+pub enum TraxError {
     #[error("CBOR encoding/decoding error")]
     Cbor,
     #[error("COSE error")]

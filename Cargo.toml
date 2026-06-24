@@ -1,11 +1,11 @@
 [package]
-name = "aaicp-core"
+name = "trax"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "AAICP v1.1.0 core library: canonical encoding, handshake/session, DAG trust chain, rotation/quarantine, rate limiting."
-repository = "https://example.com/aaicp-core" # update me
-keywords = ["aaicp", "aaip", "agents", "security", "dag"]
+description = "TRAX v1.1.0 core library: canonical encoding, handshake/session, DAG trust chain, rotation/quarantine, rate limiting."
+repository = "https://github.com/YOUR_USERNAME/trax" # update me
+keywords = ["trax", "aaip", "agents", "security", "dag"]
 
 [features]
 default = ["crypto-ed25519", "hash-blake3", "serde"]
@@ -13,7 +13,7 @@ no_std = []
 crypto-ed25519 = ["ed25519-dalek"]
 crypto-x25519 = ["x25519-dalek"]
 hash-blake3 = ["blake3"]
-hash-sha2 = ["sha2"]
+hash-sha2 = []
 serde = ["dep:serde", "dep:serde_bytes"]
 
 [dependencies]
@@ -26,7 +26,7 @@ ed25519-dalek = { version = "2", optional = true, default-features = false, feat
 x25519-dalek = { version = "2", optional = true, default-features = false }
 rand_core = "0.6"
 blake3 = { version = "1", optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = "0.10"
 hkdf = "0.12"
 lru = "0.12"
 thiserror = "1"

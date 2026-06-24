@@ -9,7 +9,7 @@ set -euo pipefail
 # - bench (criterion)
 # - shell
 
-echo "AAICP container starting with MODE=${MODE}"
+echo "TRAX container starting with MODE=${MODE}"
 
 case "${MODE}" in
   handshake_client)
