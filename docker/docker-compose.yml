@@ -1,0 +1,14 @@
+
+services:
+  aaicp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: aaicp-core:dev
+    environment:
+      - MODE=aaip_scenario
+    volumes:
+      - vectors:/app/vectors/generated
+    tty: true
+volumes:
+  vectors: {}

@@ -1,0 +1,7 @@
+target
+.git
+**/*.rs.bk
+**/*.swp
+.vscode
+.idea
+*.zip
