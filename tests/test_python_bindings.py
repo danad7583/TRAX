@@ -192,3 +192,42 @@ def test_admission_envelope_v1_rejects_malformed_inputs():
             "packet0.admission",
             [b"short"],
         )
+
+
+def test_local_dag_admits_verified_packet0_only():
+    sender = trax.generate_keypair()
+    receiver = trax.generate_keypair()
+    wrong_receiver = trax.generate_keypair()
+    payload = b"packet zero payload"
+    envelope = trax.create_admission_envelope_v1(
+        sender["private_key"],
+        receiver["public_key"],
+        trax.hash32(b"session transcript"),
+        trax.generate_nonce(),
+        payload,
+        "packet0.admission",
+    )
+    dag = trax.LocalDag()
+
+    assert dag.is_empty() is True
+    assert len(dag) == 0
+
+    node_id = dag.admit_packet0(envelope, payload, receiver["public_key"])
+
+    assert isinstance(node_id, bytes)
+    assert len(node_id) == 32
+    assert dag.is_empty() is False
+    assert dag.len() == 1
+    assert len(dag) == 1
+
+    tampered_dag = trax.LocalDag()
+    with pytest.raises(ValueError):
+        tampered_dag.admit_packet0(envelope, b"tampered", receiver["public_key"])
+    assert tampered_dag.len() == 0
+
+    wrong_receiver_dag = trax.LocalDag()
+    with pytest.raises(ValueError):
+        wrong_receiver_dag.admit_packet0(
+            envelope, payload, wrong_receiver["public_key"]
+        )
+    assert wrong_receiver_dag.len() == 0

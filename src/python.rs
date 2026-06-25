@@ -12,6 +12,11 @@ struct PrivateKey {
     signing_key: ed25519_dalek::SigningKey,
 }
 
+#[pyclass(module = "trax")]
+struct LocalDag {
+    inner: crate::admission_dag::LocalAdmissionDag,
+}
+
 #[pymethods]
 impl PrivateKey {
     fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
@@ -21,6 +26,46 @@ impl PrivateKey {
 
     fn __repr__(&self) -> &'static str {
         "<trax.PrivateKey>"
+    }
+}
+
+#[pymethods]
+impl LocalDag {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: crate::admission_dag::LocalAdmissionDag::new(),
+        }
+    }
+
+    fn admit_packet0<'py>(
+        &mut self,
+        py: Python<'py>,
+        envelope: &[u8],
+        payload: &[u8],
+        receiver_public_key: &[u8],
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let node_id = self
+            .inner
+            .admit_packet0(envelope, payload, receiver_public_key)
+            .map_err(trax_error)?;
+        Ok(PyBytes::new_bound(py, &node_id))
+    }
+
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    fn __len__(&self) -> usize {
+        self.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<trax.LocalDag len={}>", self.len())
     }
 }
 
@@ -212,6 +257,7 @@ fn trax_error(err: crate::TraxError) -> PyErr {
 
 #[pymodule]
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<LocalDag>()?;
     module.add_class::<PrivateKey>()?;
     module.add_function(wrap_pyfunction!(create_admission_envelope_v1, module)?)?;
     module.add_function(wrap_pyfunction!(decode_admission_envelope_v1, module)?)?;

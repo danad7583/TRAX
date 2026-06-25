@@ -194,6 +194,12 @@ assert (
     )
     is True
 )
+
+dag = trax.LocalDag()
+node_id = dag.admit_packet0(envelope, payload, receiver["public_key"])
+
+assert len(node_id) == 32
+assert len(dag) == 1
 ```
 
 ### Python API
@@ -256,6 +262,26 @@ Verifies the envelope and additionally checks that it is bound to the expected
 Decodes canonical CBOR Admission Envelope v1 bytes into a Python dictionary for
 inspection. Verification should still use `verify_admission_envelope_v1` or
 `verify_admission_envelope_v1_for_receiver`.
+
+`LocalDag()`
+
+Creates a local in-memory DAG admission history. This is ephemeral process-local
+state and is not persistent storage, distributed DAG sync, replay prevention, or
+full parent trust validation.
+
+`LocalDag.admit_packet0(envelope: bytes, payload: bytes, receiver_public_key: bytes) -> bytes`
+
+Verifies a receiver-bound Packet 0 admission envelope and appends a local DAG
+node representing the verified admission event. Returns a stable 32-byte
+admission node ID. Verification failure raises an exception and does not append.
+
+`LocalDag.len() -> int`
+
+Returns the number of local admitted Packet 0 DAG nodes.
+
+`LocalDag.is_empty() -> bool`
+
+Returns whether the local in-memory DAG has no admitted Packet 0 nodes.
 
 ## Test
 
