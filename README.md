@@ -127,6 +127,76 @@ This does not prevent benchmarks from running.
 cargo build --release
 ```
 
+## Python Bindings
+
+TRAX provides a Python extension module named `trax`. The Python API is a thin
+PyO3/maturin binding over the compiled Rust crate; cryptographic and trust logic
+remain in Rust.
+
+After the package is installed from a built wheel or package distribution,
+applications can import it directly:
+
+```python
+import trax
+
+digest = trax.hash32(b"hello")
+```
+
+Session and Ed25519 helpers are also exposed as bytes-based wrappers around the
+Rust implementation:
+
+```python
+import trax
+
+keys = trax.generate_keypair()
+private_key = keys["private_key"]
+public_key = keys["public_key"]
+
+message = b"hello from python"
+signature = trax.sign_message(private_key, message)
+
+assert trax.verify_message(public_key, message, signature) is True
+assert trax.verify_message(public_key, b"tampered", signature) is False
+
+nonce_a = trax.generate_nonce()
+nonce_b = trax.generate_nonce()
+transcript_hash = trax.hash32(b"demo transcript")
+session_id = trax.derive_session_id(transcript_hash, nonce_a, nonce_b)
+
+assert len(session_id) == 32
+```
+
+### Python API
+
+`hash32(data: bytes) -> bytes`
+
+Returns the 32-byte TRAX hash for `data`.
+
+`generate_keypair() -> dict`
+
+Generates an Ed25519 keypair in Rust and returns `{"private_key": bytes,
+"public_key": bytes}`. Both keys are 32 bytes.
+
+`generate_nonce() -> bytes`
+
+Returns a 16-byte cryptographically random nonce generated in Rust.
+
+`derive_session_id(transcript_hash: bytes, client_nonce: bytes, server_nonce: bytes) -> bytes`
+
+Derives a 32-byte TRAX session ID in Rust. `transcript_hash` must be 32 bytes;
+`client_nonce` and `server_nonce` must be 16 bytes each.
+
+`sign_message(private_key: bytes, message: bytes) -> bytes`
+
+Signs `message` with a 32-byte Ed25519 private key and returns a 64-byte
+signature.
+
+`verify_message(public_key: bytes, message: bytes, signature: bytes) -> bool`
+
+Verifies a 64-byte Ed25519 signature with a 32-byte public key. Returns `True`
+for a valid signature and `False` for a validly shaped signature that does not
+verify.
+
 ## Test
 
 ```bash

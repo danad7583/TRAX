@@ -7,6 +7,9 @@ description = "TRAX v1.1.0 core library: canonical encoding, handshake/session, 
 repository = "https://github.com/YOUR_USERNAME/trax" # update me
 keywords = ["trax", "aaip", "agents", "security", "dag"]
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [features]
 default = ["crypto-ed25519", "hash-blake3", "serde"]
 no_std = []
@@ -15,6 +18,7 @@ crypto-x25519 = ["x25519-dalek"]
 hash-blake3 = ["blake3"]
 hash-sha2 = []
 serde = ["dep:serde", "dep:serde_bytes"]
+python = ["dep:pyo3"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
@@ -31,6 +35,7 @@ hkdf = "0.12"
 lru = "0.12"
 thiserror = "1"
 rand = "0.8"
+pyo3 = { version = "0.22", optional = true, features = ["extension-module"] }
 
 [dev-dependencies]
 hex = "0.4"

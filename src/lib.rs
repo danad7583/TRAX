@@ -6,15 +6,18 @@
 //!
 //! NOTE: Some parts are reference implementations; tune for your threat model.
 
-pub mod types;
-pub mod encoding;
 pub mod crypto;
-pub mod session;
 pub mod dag;
+pub mod encoding;
+pub mod errors;
+pub mod rate;
 pub mod replay;
 pub mod rotation;
-pub mod rate;
-pub mod errors;
+pub mod session;
+pub mod types;
 
-pub use types::*;
+#[cfg(feature = "python")]
+mod python;
+
 pub use errors::TraxError;
+pub use types::*;

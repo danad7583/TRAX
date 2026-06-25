@@ -1,6 +1,18 @@
 # Rust build output
 /target/
 
+# Local Python tooling
+/.venv/
+/.tools/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Codex/task notes
+/CODEX_TASK.md
+
 # Cargo lock
 # Keep Cargo.lock for binaries/apps.
 # For libraries, this is optional. TRAX is a library, so either choice is acceptable.
