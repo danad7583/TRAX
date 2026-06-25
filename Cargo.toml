@@ -2,9 +2,9 @@
 name = "trax"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 description = "TRAX v1.1.0 core library: canonical encoding, handshake/session, DAG trust chain, rotation/quarantine, rate limiting."
-repository = "https://github.com/YOUR_USERNAME/trax" # update me
+repository = "https://github.com/danad7583/TRAX"
 keywords = ["trax", "aaip", "agents", "security", "dag"]
 
 [lib]
