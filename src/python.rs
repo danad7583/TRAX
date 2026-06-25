@@ -2,11 +2,27 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
-const ED25519_PRIVATE_KEY_LEN: usize = 32;
 const ED25519_PUBLIC_KEY_LEN: usize = 32;
 const ED25519_SIGNATURE_LEN: usize = 64;
 const NONCE_LEN: usize = 16;
 const HASH32_LEN: usize = 32;
+
+#[pyclass(module = "trax")]
+struct PrivateKey {
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+#[pymethods]
+impl PrivateKey {
+    fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let verifying_key = self.signing_key.verifying_key();
+        PyBytes::new_bound(py, verifying_key.as_bytes())
+    }
+
+    fn __repr__(&self) -> &'static str {
+        "<trax.PrivateKey>"
+    }
+}
 
 #[pyfunction]
 fn hash32<'py>(py: Python<'py>, data: &[u8]) -> Bound<'py, PyBytes> {
@@ -24,10 +40,7 @@ fn generate_keypair(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
     let verifying_key = signing_key.verifying_key();
 
     let keys = PyDict::new_bound(py);
-    keys.set_item(
-        "private_key",
-        PyBytes::new_bound(py, &signing_key.to_bytes()),
-    )?;
+    keys.set_item("private_key", Py::new(py, PrivateKey { signing_key })?)?;
     keys.set_item(
         "public_key",
         PyBytes::new_bound(py, verifying_key.as_bytes()),
@@ -64,18 +77,10 @@ fn derive_session_id<'py>(
 #[pyfunction]
 fn sign_message<'py>(
     py: Python<'py>,
-    private_key: &[u8],
+    private_key: PyRef<'py, PrivateKey>,
     message: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    use ed25519_dalek::SigningKey;
-
-    validate_len("private_key", private_key, ED25519_PRIVATE_KEY_LEN)?;
-
-    let private_key: [u8; ED25519_PRIVATE_KEY_LEN] = private_key
-        .try_into()
-        .map_err(|_| PyValueError::new_err("private_key must be 32 bytes"))?;
-    let signing_key = SigningKey::from_bytes(&private_key);
-    let signature = crate::crypto::ed25519_sign(&signing_key, message);
+    let signature = crate::crypto::ed25519_sign(&private_key.signing_key, message);
 
     Ok(PyBytes::new_bound(py, &signature))
 }
@@ -113,6 +118,7 @@ fn validate_len(name: &str, value: &[u8], expected: usize) -> PyResult<()> {
 
 #[pymodule]
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    module.add_class::<PrivateKey>()?;
     module.add_function(wrap_pyfunction!(derive_session_id, module)?)?;
     module.add_function(wrap_pyfunction!(generate_keypair, module)?)?;
     module.add_function(wrap_pyfunction!(generate_nonce, module)?)?;

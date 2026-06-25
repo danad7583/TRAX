@@ -14,9 +14,11 @@ def test_keypair_sign_verify_and_session_usage():
     private_key = keys["private_key"]
     public_key = keys["public_key"]
 
-    assert isinstance(private_key, bytes)
+    assert isinstance(private_key, trax.PrivateKey)
+    assert not isinstance(private_key, bytes)
+    assert private_key.public_key() == public_key
+    assert repr(private_key) == "<trax.PrivateKey>"
     assert isinstance(public_key, bytes)
-    assert len(private_key) == 32
     assert len(public_key) == 32
 
     message = b"hello from python"
@@ -37,11 +39,26 @@ def test_keypair_sign_verify_and_session_usage():
     assert len(session_id) == 32
 
 
+def test_private_key_is_opaque_and_not_raw_bytes():
+    keys = trax.generate_keypair()
+    private_key = keys["private_key"]
+
+    assert isinstance(private_key, trax.PrivateKey)
+    assert not isinstance(private_key, bytes)
+    assert not hasattr(private_key, "__bytes__")
+
+    with pytest.raises(TypeError):
+        len(private_key)
+
+    with pytest.raises(TypeError):
+        trax.sign_message(keys["public_key"], b"message")
+
+
 def test_malformed_lengths_raise_value_error():
     keys = trax.generate_keypair()
     signature = trax.sign_message(keys["private_key"], b"message")
 
-    with pytest.raises(ValueError, match="private_key must be 32 bytes"):
+    with pytest.raises(TypeError):
         trax.sign_message(b"short", b"message")
 
     with pytest.raises(ValueError, match="public_key must be 32 bytes"):

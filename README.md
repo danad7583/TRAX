@@ -174,8 +174,13 @@ Returns the 32-byte TRAX hash for `data`.
 
 `generate_keypair() -> dict`
 
-Generates an Ed25519 keypair in Rust and returns `{"private_key": bytes,
-"public_key": bytes}`. Both keys are 32 bytes.
+Generates an Ed25519 keypair in Rust and returns `{"private_key": PrivateKey,
+"public_key": bytes}`. The private key is an opaque Rust-backed Python object;
+the public key is 32 bytes.
+
+`PrivateKey.public_key() -> bytes`
+
+Returns the 32-byte public key corresponding to the opaque private key.
 
 `generate_nonce() -> bytes`
 
@@ -186,10 +191,10 @@ Returns a 16-byte cryptographically random nonce generated in Rust.
 Derives a 32-byte TRAX session ID in Rust. `transcript_hash` must be 32 bytes;
 `client_nonce` and `server_nonce` must be 16 bytes each.
 
-`sign_message(private_key: bytes, message: bytes) -> bytes`
+`sign_message(private_key: PrivateKey, message: bytes) -> bytes`
 
-Signs `message` with a 32-byte Ed25519 private key and returns a 64-byte
-signature.
+Signs `message` with an opaque Rust-backed Ed25519 private key and returns a
+64-byte signature. Raw private key bytes are not accepted by this API.
 
 `verify_message(public_key: bytes, message: bytes, signature: bytes) -> bool`
 
