@@ -1,6 +1,6 @@
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 const ED25519_PUBLIC_KEY_LEN: usize = 32;
 const ED25519_SIGNATURE_LEN: usize = 64;
@@ -105,6 +105,96 @@ fn verify_message(public_key: &[u8], message: &[u8], signature: &[u8]) -> PyResu
     ))
 }
 
+#[pyfunction]
+#[pyo3(signature = (
+    private_key,
+    receiver_public_key,
+    session_id,
+    nonce,
+    payload,
+    message_type,
+    dag_parent_refs=None,
+    proof_type="none"
+))]
+fn create_admission_envelope_v1<'py>(
+    py: Python<'py>,
+    private_key: PyRef<'py, PrivateKey>,
+    receiver_public_key: &[u8],
+    session_id: &[u8],
+    nonce: &[u8],
+    payload: &[u8],
+    message_type: &str,
+    dag_parent_refs: Option<Vec<Vec<u8>>>,
+    proof_type: &str,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let dag_parent_refs = dag_parent_refs.unwrap_or_default();
+    let envelope = crate::admission::create_admission_envelope_v1(
+        &private_key.signing_key,
+        receiver_public_key,
+        session_id,
+        nonce,
+        payload,
+        message_type,
+        &dag_parent_refs,
+        proof_type,
+    )
+    .map_err(trax_error)?;
+
+    Ok(PyBytes::new_bound(py, &envelope))
+}
+
+#[pyfunction]
+fn verify_admission_envelope_v1(envelope: &[u8], payload: &[u8]) -> PyResult<bool> {
+    crate::admission::verify_admission_envelope_v1(envelope, payload).map_err(trax_error)
+}
+
+#[pyfunction]
+fn verify_admission_envelope_v1_for_receiver(
+    envelope: &[u8],
+    payload: &[u8],
+    receiver_public_key: &[u8],
+) -> PyResult<bool> {
+    crate::admission::verify_admission_envelope_v1_for_receiver(
+        envelope,
+        payload,
+        receiver_public_key,
+    )
+    .map_err(trax_error)
+}
+
+#[pyfunction]
+fn decode_admission_envelope_v1<'py>(
+    py: Python<'py>,
+    envelope: &[u8],
+) -> PyResult<Bound<'py, PyDict>> {
+    let envelope = crate::admission::decode_admission_envelope_v1(envelope).map_err(trax_error)?;
+    let decoded = PyDict::new_bound(py);
+    decoded.set_item("version", envelope.version)?;
+    decoded.set_item("session_id", PyBytes::new_bound(py, &envelope.session_id))?;
+    decoded.set_item("nonce", PyBytes::new_bound(py, &envelope.nonce))?;
+    decoded.set_item(
+        "sender_public_key",
+        PyBytes::new_bound(py, &envelope.sender_public_key),
+    )?;
+    decoded.set_item(
+        "receiver_public_key",
+        PyBytes::new_bound(py, &envelope.receiver_public_key),
+    )?;
+    decoded.set_item(
+        "payload_hash",
+        PyBytes::new_bound(py, &envelope.payload_hash),
+    )?;
+    decoded.set_item("message_type", envelope.message_type)?;
+    let dag_parent_refs = PyList::empty_bound(py);
+    for parent_ref in envelope.dag_parent_refs {
+        dag_parent_refs.append(PyBytes::new_bound(py, &parent_ref))?;
+    }
+    decoded.set_item("dag_parent_refs", dag_parent_refs)?;
+    decoded.set_item("proof_type", envelope.proof_type)?;
+    decoded.set_item("signature", PyBytes::new_bound(py, &envelope.signature))?;
+    Ok(decoded)
+}
+
 fn validate_len(name: &str, value: &[u8], expected: usize) -> PyResult<()> {
     if value.len() == expected {
         Ok(())
@@ -116,14 +206,25 @@ fn validate_len(name: &str, value: &[u8], expected: usize) -> PyResult<()> {
     }
 }
 
+fn trax_error(err: crate::TraxError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
+
 #[pymodule]
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PrivateKey>()?;
+    module.add_function(wrap_pyfunction!(create_admission_envelope_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(decode_admission_envelope_v1, module)?)?;
     module.add_function(wrap_pyfunction!(derive_session_id, module)?)?;
     module.add_function(wrap_pyfunction!(generate_keypair, module)?)?;
     module.add_function(wrap_pyfunction!(generate_nonce, module)?)?;
     module.add_function(wrap_pyfunction!(hash32, module)?)?;
     module.add_function(wrap_pyfunction!(sign_message, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_admission_envelope_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        verify_admission_envelope_v1_for_receiver,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(verify_message, module)?)?;
     Ok(())
 }

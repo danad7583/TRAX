@@ -8,6 +8,8 @@ pub enum TraxError {
     Cose,
     #[error("Crypto error")]
     Crypto,
+    #[error("Invalid input: {0}")]
+    InvalidInput(&'static str),
     #[error("Bad signature")]
     BadSignature,
     #[error("Stale counter")]

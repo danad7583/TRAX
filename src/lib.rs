@@ -6,6 +6,7 @@
 //!
 //! NOTE: Some parts are reference implementations; tune for your threat model.
 
+pub mod admission;
 pub mod crypto;
 pub mod dag;
 pub mod encoding;

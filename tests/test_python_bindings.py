@@ -72,3 +72,123 @@ def test_malformed_lengths_raise_value_error():
 
     with pytest.raises(ValueError, match="client_nonce must be 16 bytes"):
         trax.derive_session_id(trax.hash32(b"demo"), b"short", trax.generate_nonce())
+
+
+def test_admission_envelope_v1_binds_packet_zero_security_fields():
+    sender = trax.generate_keypair()
+    receiver = trax.generate_keypair()
+    payload = b"packet zero payload"
+    session_id = trax.hash32(b"session transcript")
+    nonce = trax.generate_nonce()
+    dag_parent_refs = [trax.hash32(b"parent-a"), trax.hash32(b"parent-b")]
+
+    envelope = trax.create_admission_envelope_v1(
+        sender["private_key"],
+        receiver["public_key"],
+        session_id,
+        nonce,
+        payload,
+        "packet0.admission",
+        dag_parent_refs,
+        "direct-ed25519",
+    )
+    same_envelope = trax.create_admission_envelope_v1(
+        sender["private_key"],
+        receiver["public_key"],
+        session_id,
+        nonce,
+        payload,
+        "packet0.admission",
+        dag_parent_refs,
+        "direct-ed25519",
+    )
+
+    assert isinstance(envelope, bytes)
+    assert envelope == same_envelope
+
+    decoded = trax.decode_admission_envelope_v1(envelope)
+    assert decoded["version"] == 1
+    assert decoded["session_id"] == session_id
+    assert decoded["nonce"] == nonce
+    assert decoded["sender_public_key"] == sender["public_key"]
+    assert decoded["receiver_public_key"] == receiver["public_key"]
+    assert decoded["payload_hash"] == trax.hash32(payload)
+    assert decoded["message_type"] == "packet0.admission"
+    assert decoded["dag_parent_refs"] == dag_parent_refs
+    assert decoded["proof_type"] == "direct-ed25519"
+    assert len(decoded["signature"]) == 64
+
+    assert trax.verify_admission_envelope_v1(envelope, payload) is True
+    assert (
+        trax.verify_admission_envelope_v1_for_receiver(
+            envelope, payload, receiver["public_key"]
+        )
+        is True
+    )
+
+    assert trax.verify_admission_envelope_v1(envelope, b"tampered") is False
+    assert (
+        trax.verify_admission_envelope_v1_for_receiver(
+            envelope, payload, sender["public_key"]
+        )
+        is False
+    )
+
+
+def test_admission_envelope_v1_rejects_malformed_inputs():
+    sender = trax.generate_keypair()
+    receiver = trax.generate_keypair()
+    payload = b"payload"
+    session_id = trax.hash32(b"session")
+    nonce = trax.generate_nonce()
+
+    with pytest.raises(ValueError, match="receiver_public_key must be 32 bytes"):
+        trax.create_admission_envelope_v1(
+            sender["private_key"],
+            b"short",
+            session_id,
+            nonce,
+            payload,
+            "packet0.admission",
+        )
+
+    with pytest.raises(ValueError, match="session_id must be 32 bytes"):
+        trax.create_admission_envelope_v1(
+            sender["private_key"],
+            receiver["public_key"],
+            b"short",
+            nonce,
+            payload,
+            "packet0.admission",
+        )
+
+    with pytest.raises(ValueError, match="nonce must be 16 bytes"):
+        trax.create_admission_envelope_v1(
+            sender["private_key"],
+            receiver["public_key"],
+            session_id,
+            b"short",
+            payload,
+            "packet0.admission",
+        )
+
+    with pytest.raises(ValueError, match="message_type must not be empty"):
+        trax.create_admission_envelope_v1(
+            sender["private_key"],
+            receiver["public_key"],
+            session_id,
+            nonce,
+            payload,
+            "",
+        )
+
+    with pytest.raises(ValueError, match="dag_parent_ref must be 32 bytes"):
+        trax.create_admission_envelope_v1(
+            sender["private_key"],
+            receiver["public_key"],
+            session_id,
+            nonce,
+            payload,
+            "packet0.admission",
+            [b"short"],
+        )

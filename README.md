@@ -166,6 +166,36 @@ session_id = trax.derive_session_id(transcript_hash, nonce_a, nonce_b)
 assert len(session_id) == 32
 ```
 
+Packet 0 admission envelopes can be created and verified as canonical CBOR bytes:
+
+```python
+sender = trax.generate_keypair()
+receiver = trax.generate_keypair()
+
+payload = b"packet zero payload"
+session_id = trax.hash32(b"session transcript")
+nonce = trax.generate_nonce()
+
+envelope = trax.create_admission_envelope_v1(
+    sender["private_key"],
+    receiver["public_key"],
+    session_id,
+    nonce,
+    payload,
+    "packet0.admission",
+)
+
+assert trax.verify_admission_envelope_v1(envelope, payload) is True
+assert (
+    trax.verify_admission_envelope_v1_for_receiver(
+        envelope,
+        payload,
+        receiver["public_key"],
+    )
+    is True
+)
+```
+
 ### Python API
 
 `hash32(data: bytes) -> bytes`
@@ -201,6 +231,31 @@ Signs `message` with an opaque Rust-backed Ed25519 private key and returns a
 Verifies a 64-byte Ed25519 signature with a 32-byte public key. Returns `True`
 for a valid signature and `False` for a validly shaped signature that does not
 verify.
+
+`create_admission_envelope_v1(private_key: PrivateKey, receiver_public_key: bytes, session_id: bytes, nonce: bytes, payload: bytes, message_type: str, dag_parent_refs: list[bytes] | None = None, proof_type: str = "none") -> bytes`
+
+Creates a canonical CBOR TRAX Admission Envelope v1 for Packet 0. The Rust
+implementation binds the session ID, nonce, sender public key, receiver public
+key, payload hash, message type, DAG parent references, proof type, and
+signature. `session_id` must be 32 bytes, `nonce` must be 16 bytes,
+`receiver_public_key` must be 32 bytes, and each DAG parent reference must be 32
+bytes.
+
+`verify_admission_envelope_v1(envelope: bytes, payload: bytes) -> bool`
+
+Verifies the Admission Envelope v1 signature and payload hash binding using the
+sender public key embedded in the envelope.
+
+`verify_admission_envelope_v1_for_receiver(envelope: bytes, payload: bytes, receiver_public_key: bytes) -> bool`
+
+Verifies the envelope and additionally checks that it is bound to the expected
+32-byte receiver public key.
+
+`decode_admission_envelope_v1(envelope: bytes) -> dict`
+
+Decodes canonical CBOR Admission Envelope v1 bytes into a Python dictionary for
+inspection. Verification should still use `verify_admission_envelope_v1` or
+`verify_admission_envelope_v1_for_receiver`.
 
 ## Test
 
