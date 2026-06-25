@@ -39,6 +39,7 @@ pub struct AdmissionEnvelopeV1Unsigned {
     pub proof_type: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create_admission_envelope_v1(
     signing_key: &SigningKey,
     receiver_public_key: &[u8],
@@ -218,22 +219,26 @@ fn validate_len(name: &'static str, value: &[u8], expected: usize) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::encode_deterministic;
     use rand::rngs::OsRng;
 
-    #[test]
-    fn admission_envelope_binds_payload_and_receiver() {
+    fn test_keys() -> (SigningKey, SigningKey, SigningKey) {
         let mut rng = OsRng;
-        let sender = SigningKey::generate(&mut rng);
-        let receiver = SigningKey::generate(&mut rng);
-        let wrong_receiver = SigningKey::generate(&mut rng);
+        (
+            SigningKey::generate(&mut rng),
+            SigningKey::generate(&mut rng),
+            SigningKey::generate(&mut rng),
+        )
+    }
 
+    fn valid_envelope(sender: &SigningKey, receiver: &SigningKey) -> Vec<u8> {
         let session_id = hash32(b"session transcript");
         let nonce = [7u8; NONCE_LEN];
         let payload = b"packet zero payload";
         let parent_refs = vec![hash32(b"parent").to_vec()];
 
-        let envelope = create_admission_envelope_v1(
-            &sender,
+        create_admission_envelope_v1(
+            sender,
             receiver.verifying_key().as_bytes(),
             &session_id,
             &nonce,
@@ -242,21 +247,198 @@ mod tests {
             &parent_refs,
             "direct-ed25519",
         )
-        .expect("admission envelope should encode");
+        .expect("admission envelope should encode")
+    }
 
-        assert!(verify_admission_envelope_v1(&envelope, payload).unwrap());
+    #[test]
+    fn valid_admission_envelope_verifies_successfully() {
+        let (sender, receiver, _) = test_keys();
+        let envelope = valid_envelope(&sender, &receiver);
+
+        assert!(verify_admission_envelope_v1(&envelope, b"packet zero payload").unwrap());
+    }
+
+    #[test]
+    fn tampered_payload_fails_verification() {
+        let (sender, receiver, _) = test_keys();
+        let envelope = valid_envelope(&sender, &receiver);
+
         assert!(!verify_admission_envelope_v1(&envelope, b"tampered").unwrap());
+    }
+
+    #[test]
+    fn wrong_receiver_public_key_fails_receiver_bound_verification() {
+        let (sender, receiver, wrong_receiver) = test_keys();
+        let envelope = valid_envelope(&sender, &receiver);
+
         assert!(verify_admission_envelope_v1_for_receiver(
             &envelope,
-            payload,
+            b"packet zero payload",
             receiver.verifying_key().as_bytes()
         )
         .unwrap());
         assert!(!verify_admission_envelope_v1_for_receiver(
             &envelope,
-            payload,
+            b"packet zero payload",
             wrong_receiver.verifying_key().as_bytes()
         )
         .unwrap());
+    }
+
+    #[test]
+    fn malformed_sender_key_length_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let envelope = valid_envelope(&sender, &receiver);
+        let mut decoded = decode_admission_envelope_v1(&envelope).unwrap();
+        decoded.sender_public_key = vec![0u8; KEY_LEN - 1];
+        let malformed = encode_deterministic(&decoded).unwrap();
+
+        assert!(matches!(
+            verify_admission_envelope_v1(&malformed, b"packet zero payload"),
+            Err(TraxError::InvalidInput(
+                "sender_public_key must be 32 bytes"
+            ))
+        ));
+    }
+
+    #[test]
+    fn malformed_receiver_key_length_fails_cleanly() {
+        let (sender, _, _) = test_keys();
+        let session_id = hash32(b"session transcript");
+        let nonce = [7u8; NONCE_LEN];
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                &[0u8; KEY_LEN - 1],
+                &session_id,
+                &nonce,
+                b"packet zero payload",
+                "packet0.admission",
+                &[],
+                "direct-ed25519",
+            ),
+            Err(TraxError::InvalidInput(
+                "receiver_public_key must be 32 bytes"
+            ))
+        ));
+    }
+
+    #[test]
+    fn malformed_session_id_length_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let nonce = [7u8; NONCE_LEN];
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                receiver.verifying_key().as_bytes(),
+                &[0u8; HASH_LEN - 1],
+                &nonce,
+                b"packet zero payload",
+                "packet0.admission",
+                &[],
+                "direct-ed25519",
+            ),
+            Err(TraxError::InvalidInput("session_id must be 32 bytes"))
+        ));
+    }
+
+    #[test]
+    fn malformed_nonce_length_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let session_id = hash32(b"session transcript");
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                receiver.verifying_key().as_bytes(),
+                &session_id,
+                &[0u8; NONCE_LEN - 1],
+                b"packet zero payload",
+                "packet0.admission",
+                &[],
+                "direct-ed25519",
+            ),
+            Err(TraxError::InvalidInput("nonce must be 16 bytes"))
+        ));
+    }
+
+    #[test]
+    fn malformed_signature_length_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let envelope = valid_envelope(&sender, &receiver);
+        let mut decoded = decode_admission_envelope_v1(&envelope).unwrap();
+        decoded.signature = vec![0u8; SIGNATURE_LEN - 1];
+        let malformed = encode_deterministic(&decoded).unwrap();
+
+        assert!(matches!(
+            verify_admission_envelope_v1(&malformed, b"packet zero payload"),
+            Err(TraxError::InvalidInput("signature must be 64 bytes"))
+        ));
+    }
+
+    #[test]
+    fn empty_message_type_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let session_id = hash32(b"session transcript");
+        let nonce = [7u8; NONCE_LEN];
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                receiver.verifying_key().as_bytes(),
+                &session_id,
+                &nonce,
+                b"packet zero payload",
+                "",
+                &[],
+                "direct-ed25519",
+            ),
+            Err(TraxError::InvalidInput("message_type must not be empty"))
+        ));
+    }
+
+    #[test]
+    fn empty_proof_type_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let session_id = hash32(b"session transcript");
+        let nonce = [7u8; NONCE_LEN];
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                receiver.verifying_key().as_bytes(),
+                &session_id,
+                &nonce,
+                b"packet zero payload",
+                "packet0.admission",
+                &[],
+                "",
+            ),
+            Err(TraxError::InvalidInput("proof_type must not be empty"))
+        ));
+    }
+
+    #[test]
+    fn invalid_dag_parent_reference_length_fails_cleanly() {
+        let (sender, receiver, _) = test_keys();
+        let session_id = hash32(b"session transcript");
+        let nonce = [7u8; NONCE_LEN];
+        let parent_refs = vec![vec![0u8; HASH_LEN - 1]];
+
+        assert!(matches!(
+            create_admission_envelope_v1(
+                &sender,
+                receiver.verifying_key().as_bytes(),
+                &session_id,
+                &nonce,
+                b"packet zero payload",
+                "packet0.admission",
+                &parent_refs,
+                "direct-ed25519",
+            ),
+            Err(TraxError::InvalidInput("dag_parent_ref must be 32 bytes"))
+        ));
     }
 }
