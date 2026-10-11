@@ -62,6 +62,28 @@ aaip_scenario = lower signed-message / packet exchange demonstration
 trax          = trust-resolution layer built around DAG history and cryptographic continuity
 ```
 
+### Receive admission invariant
+
+Receipt is not admission. Packet 0/genesis is individually authenticated and establishes the
+initial trusted session, receiver, lineage key, and DAG root. Every normal post-genesis event
+MUST enter a provisional K-window first; structural validation alone MUST NOT advance trusted
+history or release the event as admitted communication.
+
+K=8 is the normative signed-batch profile. Events 1 through 7 remain provisional. The eighth
+event carries or is associated with `SegmentSealV1`, which signs a deterministic,
+domain-separated `SegmentCommitmentV1`. That commitment binds the session, receiver, trusted
+lineage key identity, segment index, contiguous counters, starting committed tip, final
+provisional tip, and the order-sensitive Merkle root of all eight events. K=8 signing is one
+segment signature, not eight per-packet signatures; the final Kth event seals the window rather
+than introducing a ninth event.
+
+A receiver SHALL verify the entire ordered window and its seal against the lineage public key
+already trusted through genesis or validated rotation. Only then SHALL it atomically admit all
+eight events and advance the committed tip. Reordering or changing an event, changing context,
+breaking tip/counter continuity, or failing signature verification rejects the whole window.
+Failure commits zero provisional events and leaves the committed DAG state unchanged. Partial
+windows MUST remain provisional and MUST NOT be promoted implicitly at end of session.
+
 ## Dependencies
 
 TRAX is a Rust project and requires the Rust toolchain, including `cargo` and `rustc`.
@@ -297,47 +319,13 @@ cargo bench --bench dag_benches
 
 Benchmarks include:
 
-* K-window DAG segment verification
-* Individual Ed25519 signing
-* K=8 Merkle batch signing
+* Ordered K=8 event commitment/Merkle-root computation
+* Signed, context-bound K=8 segment-seal creation
+* Full K=8 verification, including context, ordered root, and Ed25519 signature
 
-Current benchmark snapshot from a Windows MSVC build:
-
-```text
-verify_last_8_nodes                  ~1.55 µs
-verify_last_16_nodes                 ~3.15 µs
-verify_last_32_nodes                 ~6.15 µs
-verify_last_64_nodes                 ~12.29 µs
-verify_last_128_nodes                ~24.69 µs
-verify_last_256_nodes                ~49.33 µs
-
-sign_8_nodes_individual_ed25519      ~183.9 µs
-sign_16_nodes_individual_ed25519     ~368.0 µs
-sign_32_nodes_individual_ed25519     ~748.9 µs
-sign_64_nodes_individual_ed25519     ~1.48 ms
-sign_128_nodes_individual_ed25519    ~2.96 ms
-sign_256_nodes_individual_ed25519    ~5.90 ms
-
-sign_batch_k8_merkle_root_ed25519    ~26.8 µs
-```
-
-Interpretation:
-
-```text
-8-node segment verification:      ~1.55 µs
-8 individual Ed25519 signatures:  ~183.9 µs
-K=8 Merkle batch signing:         ~26.8 µs
-```
-
-K=8 Merkle batch signing is approximately **6.8x faster** than signing 8 nodes individually in the measured environment.
-
-Approximate throughput:
-
-```text
-8-node segment verification:       ~644,000 segment verifications/sec
-K=8 Merkle batch signing:          ~37,000 signed batches/sec
-Node-equivalent batch throughput:  ~298,000 signed node-equivalents/sec
-```
+Historical figures for the former XOR-based length/hash check are intentionally omitted: that
+operation was not trusted segment verification. Use the benchmark command above to measure the
+real security operations on the target platform.
 
 These benchmarks measure local cryptographic and DAG operations. They do not represent end-to-end network latency, remote agent processing, or full distributed system throughput.
 

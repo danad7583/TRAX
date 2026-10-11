@@ -10,7 +10,12 @@ pub struct TokenBucket {
 
 impl TokenBucket {
     pub fn new(capacity: u64, refill_per_sec: f64) -> Self {
-        Self { capacity, tokens: capacity as f64, refill_per_sec, last: Instant::now() }
+        Self {
+            capacity,
+            tokens: capacity as f64,
+            refill_per_sec,
+            last: Instant::now(),
+        }
     }
     pub fn allow(&mut self, cost: u64) -> bool {
         let now = Instant::now();
@@ -20,6 +25,8 @@ impl TokenBucket {
         if self.tokens >= cost as f64 {
             self.tokens -= cost as f64;
             true
-        } else { false }
+        } else {
+            false
+        }
     }
 }

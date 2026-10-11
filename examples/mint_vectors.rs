@@ -2,11 +2,11 @@
 //! Usage:
 //!   cargo run --example mint_vectors --features crypto-ed25519,hash-blake3
 //! Outputs raw binary vectors into ./vectors/generated/*
+use coset::{iana, Algorithm, CborSerializable, CoseSign1, Header, ProtectedHeader};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use rand_core::OsRng;
 use std::fs;
 use std::path::PathBuf;
-use rand_core::OsRng;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer};
-use coset::{CborSerializable, CoseSign1, Header, ProtectedHeader, Algorithm, iana};
 
 fn outdir() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

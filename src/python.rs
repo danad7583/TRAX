@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments, clippy::useless_conversion)]
+
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -15,6 +17,88 @@ struct PrivateKey {
 #[pyclass(module = "trax")]
 struct LocalDag {
     inner: crate::admission_dag::LocalAdmissionDag,
+}
+
+#[pyclass(module = "trax")]
+struct ReceiveAdmissionWindow {
+    inner: crate::dag::ReceiveAdmissionWindow,
+}
+
+#[pymethods]
+impl ReceiveAdmissionWindow {
+    #[new]
+    #[pyo3(signature = (session_id, receiver_id, lineage_public_key, committed_tip, segment_index=0, next_counter=0))]
+    fn new(
+        session_id: &[u8],
+        receiver_id: &[u8],
+        lineage_public_key: &[u8],
+        committed_tip: &[u8],
+        segment_index: u64,
+        next_counter: u64,
+    ) -> PyResult<Self> {
+        use ed25519_dalek::VerifyingKey;
+        validate_len("session_id", session_id, HASH32_LEN)?;
+        validate_len("receiver_id", receiver_id, HASH32_LEN)?;
+        validate_len(
+            "lineage_public_key",
+            lineage_public_key,
+            ED25519_PUBLIC_KEY_LEN,
+        )?;
+        validate_len("committed_tip", committed_tip, HASH32_LEN)?;
+        let key_bytes: [u8; 32] = lineage_public_key.try_into().unwrap();
+        let key = VerifyingKey::from_bytes(&key_bytes)
+            .map_err(|_| PyValueError::new_err("invalid lineage public key"))?;
+        Ok(Self {
+            inner: crate::dag::ReceiveAdmissionWindow::new_k8(
+                session_id.try_into().unwrap(),
+                receiver_id.try_into().unwrap(),
+                key,
+                committed_tip.try_into().unwrap(),
+                segment_index,
+                next_counter,
+            ),
+        })
+    }
+
+    fn stage<'py>(&mut self, py: Python<'py>, event: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+        let event = crate::encoding::decode(event).map_err(trax_error)?;
+        let tip = self.inner.stage(event).map_err(trax_error)?;
+        Ok(PyBytes::new_bound(py, &tip))
+    }
+
+    fn verify_and_commit<'py>(
+        &mut self,
+        py: Python<'py>,
+        seal: &[u8],
+    ) -> PyResult<Bound<'py, PyList>> {
+        let seal = crate::encoding::decode(seal).map_err(trax_error)?;
+        let encoded = self
+            .inner
+            .verify_and_commit(&seal)
+            .map_err(trax_error)?
+            .iter()
+            .map(crate::encoding::encode_deterministic)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(trax_error)?;
+        let result = PyList::empty_bound(py);
+        for event in encoded {
+            result.append(PyBytes::new_bound(py, &event))?;
+        }
+        Ok(result)
+    }
+
+    fn provisional_count(&self) -> usize {
+        self.inner.provisional_count()
+    }
+    fn committed_count(&self) -> usize {
+        self.inner.committed_count()
+    }
+    fn committed_tip<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &self.inner.committed_tip())
+    }
+    fn provisional_tip<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new_bound(py, &self.inner.provisional_tip())
+    }
 }
 
 #[pymethods]
@@ -73,6 +157,91 @@ impl LocalDag {
 fn hash32<'py>(py: Python<'py>, data: &[u8]) -> Bound<'py, PyBytes> {
     let digest = crate::crypto::hash32(data);
     PyBytes::new_bound(py, &digest)
+}
+
+#[pyfunction]
+#[pyo3(signature = (session_id, lineage_public_key, receiver_id, segment_index, counter, previous_tip, content_hash, payload_hash))]
+fn create_post_genesis_event_v1<'py>(
+    py: Python<'py>,
+    session_id: &[u8],
+    lineage_public_key: &[u8],
+    receiver_id: &[u8],
+    segment_index: u64,
+    counter: u64,
+    previous_tip: &[u8],
+    content_hash: &[u8],
+    payload_hash: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    use ed25519_dalek::VerifyingKey;
+    for (name, value) in [
+        ("session_id", session_id),
+        ("receiver_id", receiver_id),
+        ("previous_tip", previous_tip),
+        ("content_hash", content_hash),
+        ("payload_hash", payload_hash),
+    ] {
+        validate_len(name, value, HASH32_LEN)?;
+    }
+    validate_len(
+        "lineage_public_key",
+        lineage_public_key,
+        ED25519_PUBLIC_KEY_LEN,
+    )?;
+    let key = VerifyingKey::from_bytes(&lineage_public_key.try_into().unwrap())
+        .map_err(|_| PyValueError::new_err("invalid lineage public key"))?;
+    let event = crate::PostGenesisEventV1 {
+        version: 1,
+        session_id: session_id.try_into().unwrap(),
+        lineage_key_id: crate::dag::lineage_key_id(&key),
+        receiver_id: receiver_id.try_into().unwrap(),
+        segment_index,
+        counter,
+        previous_tip: previous_tip.try_into().unwrap(),
+        content_hash: content_hash.try_into().unwrap(),
+        payload_hash: payload_hash.try_into().unwrap(),
+    };
+    let bytes = crate::encoding::encode_deterministic(&event).map_err(trax_error)?;
+    Ok(PyBytes::new_bound(py, &bytes))
+}
+
+#[pyfunction]
+fn create_segment_seal_k8<'py>(
+    py: Python<'py>,
+    private_key: PyRef<'py, PrivateKey>,
+    events: Vec<Vec<u8>>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let events = events
+        .iter()
+        .map(|e| crate::encoding::decode(e))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(trax_error)?;
+    let seal = crate::dag::create_segment_seal_k8(&private_key.signing_key, &events)
+        .map_err(trax_error)?;
+    let bytes = crate::encoding::encode_deterministic(&seal).map_err(trax_error)?;
+    Ok(PyBytes::new_bound(py, &bytes))
+}
+
+#[pyfunction]
+fn verify_segment_seal_k8(
+    lineage_public_key: &[u8],
+    events: Vec<Vec<u8>>,
+    seal: &[u8],
+) -> PyResult<bool> {
+    use ed25519_dalek::VerifyingKey;
+    validate_len(
+        "lineage_public_key",
+        lineage_public_key,
+        ED25519_PUBLIC_KEY_LEN,
+    )?;
+    let key = VerifyingKey::from_bytes(&lineage_public_key.try_into().unwrap())
+        .map_err(|_| PyValueError::new_err("invalid lineage public key"))?;
+    let events = events
+        .iter()
+        .map(|e| crate::encoding::decode(e))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(trax_error)?;
+    let seal = crate::encoding::decode(seal).map_err(trax_error)?;
+    Ok(crate::dag::verify_segment_proof(&crate::SegmentProof { events, seal }, &key).is_ok())
 }
 
 #[pyfunction]
@@ -259,6 +428,11 @@ fn trax_error(err: crate::TraxError) -> PyErr {
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<LocalDag>()?;
     module.add_class::<PrivateKey>()?;
+    module.add_class::<ReceiveAdmissionWindow>()?;
+    module.add("DEFAULT_SEGMENT_K", crate::dag::DEFAULT_SEGMENT_K)?;
+    module.add_function(wrap_pyfunction!(create_post_genesis_event_v1, module)?)?;
+    module.add_function(wrap_pyfunction!(create_segment_seal_k8, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_segment_seal_k8, module)?)?;
     module.add_function(wrap_pyfunction!(create_admission_envelope_v1, module)?)?;
     module.add_function(wrap_pyfunction!(decode_admission_envelope_v1, module)?)?;
     module.add_function(wrap_pyfunction!(derive_session_id, module)?)?;

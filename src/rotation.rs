@@ -5,11 +5,9 @@ pub struct RotationProof<'a> {
     pub signed_by_old: &'a [u8],
 }
 
+#[derive(Default)]
 pub enum QuarantineState {
+    #[default]
     Normal,
     Quarantined,
-}
-
-impl Default for QuarantineState {
-    fn default() -> Self { QuarantineState::Normal }
 }

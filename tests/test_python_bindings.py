@@ -231,3 +231,40 @@ def test_local_dag_admits_verified_packet0_only():
             envelope, payload, wrong_receiver["public_key"]
         )
     assert wrong_receiver_dag.len() == 0
+
+
+def test_k8_receive_window_keeps_first_seven_events_provisional():
+    lineage = trax.generate_keypair()
+    session_id = trax.hash32(b"segment session")
+    receiver_id = trax.hash32(b"receiver identity")
+    genesis_tip = trax.hash32(b"packet zero root")
+    window = trax.ReceiveAdmissionWindow(
+        session_id, receiver_id, lineage["public_key"], genesis_tip
+    )
+    events = []
+    tip = genesis_tip
+    for counter in range(8):
+        event = trax.create_post_genesis_event_v1(
+            session_id,
+            lineage["public_key"],
+            receiver_id,
+            0,
+            counter,
+            tip,
+            trax.hash32(f"content-{counter}".encode()),
+            trax.hash32(f"payload-{counter}".encode()),
+        )
+        events.append(event)
+        tip = window.stage(event)
+        if counter < 7:
+            assert window.committed_count() == 0
+            assert window.committed_tip() == genesis_tip
+
+    assert window.provisional_count() == 8
+    seal = trax.create_segment_seal_k8(lineage["private_key"], events)
+    assert trax.verify_segment_seal_k8(lineage["public_key"], events, seal)
+    admitted = window.verify_and_commit(seal)
+    assert admitted == events
+    assert window.provisional_count() == 0
+    assert window.committed_count() == 8
+    assert window.committed_tip() == tip

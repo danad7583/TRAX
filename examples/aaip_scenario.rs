@@ -1,9 +1,9 @@
 //! Simulate Agent A ↔ Agent B scenario per TRAX v1.1.0
+use coset::{iana, Algorithm, CborSerializable, CoseSign1, Header, ProtectedHeader};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
-use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier, Signature};
-use trax::session::derive_session_id;
 use trax::crypto::hash32;
-use coset::{CborSerializable, CoseSign1, Header, ProtectedHeader, Algorithm, iana};
+use trax::session::derive_session_id;
 
 fn sign_cose(sk: &SigningKey, payload: &[u8]) -> Vec<u8> {
     let mut header = Header::default();

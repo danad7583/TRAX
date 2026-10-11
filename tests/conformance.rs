@@ -10,9 +10,31 @@ fn req_3_1_1_deterministic_cbor() {
 
 #[test]
 fn req_5_1_1_segment_proof_validates() {
-    // Placeholder logic: will parse CBOR in real vectors
-    let v = load_vector("segment_proof_valid.cbor");
-    assert!(!v.is_empty());
+    use ed25519_dalek::SigningKey;
+    use trax::crypto::hash32;
+    use trax::dag::{create_segment_seal_k8, event_tip, lineage_key_id, verify_segment_proof};
+    use trax::{PostGenesisEventV1, SegmentProof};
+    let key = SigningKey::from_bytes(&[7; 32]);
+    let mut tip = hash32(b"genesis");
+    let events = (0..8)
+        .map(|counter| {
+            let event = PostGenesisEventV1 {
+                version: 1,
+                session_id: hash32(b"session"),
+                lineage_key_id: lineage_key_id(&key.verifying_key()),
+                receiver_id: hash32(b"receiver"),
+                segment_index: 0,
+                counter,
+                previous_tip: tip,
+                content_hash: hash32(&[counter as u8]),
+                payload_hash: hash32(&[counter as u8, 1]),
+            };
+            tip = event_tip(&event).unwrap();
+            event
+        })
+        .collect::<Vec<_>>();
+    let seal = create_segment_seal_k8(&key, &events).unwrap();
+    verify_segment_proof(&SegmentProof { events, seal }, &key.verifying_key()).unwrap();
 }
 
 #[test]

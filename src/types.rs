@@ -42,11 +42,48 @@ pub struct DagNode {
     pub signature: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SegmentProof {
+/// A normal post-genesis event. Its tip is the domain-separated hash of its
+/// deterministic encoding; the payload itself may be stored out of band.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PostGenesisEventV1 {
+    pub version: u8,
+    pub session_id: [u8; 32],
+    pub lineage_key_id: [u8; 32],
+    pub receiver_id: [u8; 32],
+    pub segment_index: u64,
+    pub counter: u64,
+    pub previous_tip: [u8; 32],
+    pub content_hash: [u8; 32],
+    pub payload_hash: [u8; 32],
+}
+
+/// Canonical, versioned context authenticated by a segment signature.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentCommitmentV1 {
+    pub version: u8,
     pub k: u32,
-    pub nodes: Vec<DagNode>,
-    pub cumulative_hash: [u8; 32],
+    pub session_id: [u8; 32],
+    pub segment_index: u64,
+    pub first_counter: u64,
+    pub last_counter: u64,
+    pub starting_committed_tip: [u8; 32],
+    pub final_provisional_tip: [u8; 32],
+    pub ordered_merkle_root: [u8; 32],
+    pub lineage_key_id: [u8; 32],
+    pub receiver_id: [u8; 32],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentSealV1 {
+    pub commitment: SegmentCommitmentV1,
+    pub signature: Vec<u8>,
+}
+
+/// A proof is the ordered events plus their signed, context-bound seal.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SegmentProof {
+    pub events: Vec<PostGenesisEventV1>,
+    pub seal: SegmentSealV1,
 }
 
 #[derive(Debug, Clone)]

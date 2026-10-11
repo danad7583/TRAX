@@ -20,4 +20,24 @@ pub enum TraxError {
     ForkSuspected,
     #[error("Rate limited")]
     RateLimited,
+    #[error("Invalid segment size")]
+    InvalidSegmentSize,
+    #[error("Segment signature verification failed")]
+    SegmentSignatureFailure,
+    #[error("Segment Merkle root mismatch")]
+    SegmentRootMismatch,
+    #[error("Segment context mismatch")]
+    SegmentContextMismatch,
+    #[error("Counter discontinuity")]
+    CounterDiscontinuity,
+    #[error("Provisional tip mismatch")]
+    ProvisionalTipMismatch,
+    #[error("Session mismatch")]
+    SessionMismatch,
+    #[error("Receiver mismatch")]
+    ReceiverMismatch,
+    #[error("Segment already complete")]
+    SegmentAlreadySealed,
+    #[error("Incomplete segment")]
+    IncompleteSegment,
 }
