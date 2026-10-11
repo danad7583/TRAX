@@ -1,7 +1,7 @@
 use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::time::Instant;
-use trax::crypto::{ed25519_sign, ed25519_sign_batch_k8};
+use trax::crypto::{ed25519_sign, ed25519_sign_merkle_root_k8_raw};
 
 fn main() {
     let mut rng = OsRng;
@@ -19,6 +19,6 @@ fn main() {
 
     // Batch K-8 test
     let start = Instant::now();
-    let (_root_sig, _proofs) = ed25519_sign_batch_k8(&sk, &messages).unwrap();
+    let (_root_sig, _proofs) = ed25519_sign_merkle_root_k8_raw(&sk, &messages).unwrap();
     println!("Batch K=8 elapsed: {:?}", start.elapsed());
 }

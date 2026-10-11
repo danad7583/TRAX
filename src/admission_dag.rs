@@ -2,9 +2,11 @@
 
 use crate::admission::{decode_admission_envelope_v1, verify_admission_envelope_v1_for_receiver};
 use crate::crypto::hash32;
+use crate::dag::{receiver_id, TrustedSessionContext};
 use crate::encoding::encode_deterministic;
 use crate::errors::TraxError;
 use crate::types::DagNode;
+use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 
 pub const PACKET0_ADMISSION_OP: u8 = 0;
@@ -50,6 +52,45 @@ impl LocalAdmissionDag {
 
     pub fn nodes(&self) -> &[AdmittedPacket0Node] {
         &self.nodes
+    }
+
+    /// Derives authoritative post-genesis lineage state from the most recently
+    /// verified Packet 0. Packet 0 itself remains immediately admitted.
+    pub fn trusted_context_from_latest_packet0(&self) -> Result<TrustedSessionContext, TraxError> {
+        let node = self
+            .nodes
+            .last()
+            .ok_or(TraxError::InvalidInput("no verified Packet 0"))?;
+        let session_id: [u8; 32] = node
+            .event
+            .session_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| TraxError::InvalidInput("session_id must be 32 bytes"))?;
+        let sender_key_bytes: [u8; 32] = node
+            .event
+            .sender_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| TraxError::InvalidInput("sender_public_key must be 32 bytes"))?;
+        let receiver_key_bytes: [u8; 32] = node
+            .event
+            .receiver_public_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| TraxError::InvalidInput("receiver_public_key must be 32 bytes"))?;
+        let lineage_key =
+            VerifyingKey::from_bytes(&sender_key_bytes).map_err(|_| TraxError::Crypto)?;
+        let receiver_key =
+            VerifyingKey::from_bytes(&receiver_key_bytes).map_err(|_| TraxError::Crypto)?;
+        Ok(TrustedSessionContext::from_verified_state(
+            session_id,
+            receiver_id(&receiver_key),
+            lineage_key,
+            node.node_id,
+            0,
+            0,
+        ))
     }
 
     pub fn admit_packet0(
@@ -142,7 +183,7 @@ mod tests {
             &nonce,
             &payload,
             "packet0.admission",
-            &[parent_ref.clone()],
+            std::slice::from_ref(&parent_ref),
             "direct-ed25519",
         )
         .expect("fixture envelope should encode");
@@ -265,5 +306,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(dag.nodes()[0].event.dag_parent_refs, vec![f.parent_ref]);
+    }
+
+    #[test]
+    fn verified_packet0_derives_trusted_post_genesis_context() {
+        let f = fixture();
+        let mut dag = LocalAdmissionDag::new();
+        let node_id = dag
+            .admit_packet0(
+                &f.envelope,
+                &f.payload,
+                f.receiver.verifying_key().as_bytes(),
+            )
+            .unwrap();
+        let context = dag.trusted_context_from_latest_packet0().unwrap();
+        assert_eq!(context.committed_tip(), node_id);
+        assert_eq!(context.lineage_key(), &f.sender.verifying_key());
+        assert_eq!(
+            context.receiver_id(),
+            receiver_id(&f.receiver.verifying_key())
+        );
+        assert_eq!(context.segment_index(), 0);
+        assert_eq!(context.next_counter(), 0);
     }
 }

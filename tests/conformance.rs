@@ -9,20 +9,25 @@ fn req_3_1_1_deterministic_cbor() {
 }
 
 #[test]
-fn req_5_1_1_segment_proof_validates() {
+fn req_5_1_1_segment_proof_is_intrinsically_valid_and_context_admitted() {
     use ed25519_dalek::SigningKey;
     use trax::crypto::hash32;
-    use trax::dag::{create_segment_seal_k8, event_tip, lineage_key_id, verify_segment_proof};
+    use trax::dag::{
+        create_segment_seal_k8, event_tip, lineage_key_id, receiver_id,
+        verify_segment_proof_for_context, verify_segment_proof_intrinsic, TrustedSessionContext,
+    };
     use trax::{PostGenesisEventV1, SegmentProof};
     let key = SigningKey::from_bytes(&[7; 32]);
-    let mut tip = hash32(b"genesis");
+    let receiver = SigningKey::from_bytes(&[8; 32]);
+    let genesis = hash32(b"genesis");
+    let mut tip = genesis;
     let events = (0..8)
         .map(|counter| {
             let event = PostGenesisEventV1 {
                 version: 1,
                 session_id: hash32(b"session"),
                 lineage_key_id: lineage_key_id(&key.verifying_key()),
-                receiver_id: hash32(b"receiver"),
+                receiver_id: receiver_id(&receiver.verifying_key()),
                 segment_index: 0,
                 counter,
                 previous_tip: tip,
@@ -34,13 +39,24 @@ fn req_5_1_1_segment_proof_validates() {
         })
         .collect::<Vec<_>>();
     let seal = create_segment_seal_k8(&key, &events).unwrap();
-    verify_segment_proof(&SegmentProof { events, seal }, &key.verifying_key()).unwrap();
+    let proof = SegmentProof { events, seal };
+    verify_segment_proof_intrinsic(&proof, &key.verifying_key()).unwrap();
+    let trusted = TrustedSessionContext::from_verified_state(
+        hash32(b"session"),
+        receiver_id(&receiver.verifying_key()),
+        key.verifying_key(),
+        genesis,
+        0,
+        0,
+    );
+    verify_segment_proof_for_context(&proof, &trusted).unwrap();
 }
 
 #[test]
 fn req_4_1_2_session_id_binding() {
-    // Placeholder until handshake demo wires in real IDs
-    assert!(true);
+    let left = trax::session::derive_session_id(b"context", b"nonce-a", b"nonce-b", None);
+    let right = trax::session::derive_session_id(b"other", b"nonce-a", b"nonce-b", None);
+    assert_ne!(left, right);
 }
 
 #[cfg(feature = "crypto-ed25519")]

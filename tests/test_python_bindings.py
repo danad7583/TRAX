@@ -219,6 +219,11 @@ def test_local_dag_admits_verified_packet0_only():
     assert dag.is_empty() is False
     assert dag.len() == 1
     assert len(dag) == 1
+    trusted = dag.trusted_context_from_latest_packet0()
+    assert isinstance(trusted, trax.TrustedSessionContext)
+    assert trusted.session_id() == trax.hash32(b"session transcript")
+    assert trusted.receiver_id() == trax.receiver_id(receiver["public_key"])
+    assert trusted.committed_tip() == node_id
 
     tampered_dag = trax.LocalDag()
     with pytest.raises(ValueError):
@@ -236,14 +241,20 @@ def test_local_dag_admits_verified_packet0_only():
 def test_k8_receive_window_keeps_first_seven_events_provisional():
     lineage = trax.generate_keypair()
     session_id = trax.hash32(b"segment session")
-    receiver_id = trax.hash32(b"receiver identity")
+    receiver = trax.generate_keypair()
+    receiver_id = trax.receiver_id(receiver["public_key"])
     genesis_tip = trax.hash32(b"packet zero root")
-    window = trax.ReceiveAdmissionWindow(
+    context = trax.TrustedSessionContext.from_verified_state(
         session_id, receiver_id, lineage["public_key"], genesis_tip
     )
+    window = trax.ReceiveAdmissionWindow(context)
+    with pytest.raises(ValueError):
+        window.stage(b"malformed cbor", b"payload")
+    assert window.provisional_count() == 0
     events = []
     tip = genesis_tip
     for counter in range(8):
+        payload = f"payload-{counter}".encode()
         event = trax.create_post_genesis_event_v1(
             session_id,
             lineage["public_key"],
@@ -252,17 +263,26 @@ def test_k8_receive_window_keeps_first_seven_events_provisional():
             counter,
             tip,
             trax.hash32(f"content-{counter}".encode()),
-            trax.hash32(f"payload-{counter}".encode()),
+            trax.hash32(payload),
         )
         events.append(event)
-        tip = window.stage(event)
+        if counter == 0:
+            with pytest.raises(ValueError, match="Payload hash mismatch"):
+                window.stage(event, b"tampered")
+            assert window.provisional_count() == 0
+        tip = window.stage(event, payload)
         if counter < 7:
             assert window.committed_count() == 0
             assert window.committed_tip() == genesis_tip
 
     assert window.provisional_count() == 8
     seal = trax.create_segment_seal_k8(lineage["private_key"], events)
-    assert trax.verify_segment_seal_k8(lineage["public_key"], events, seal)
+    assert trax.verify_segment_seal_k8_intrinsic(lineage["public_key"], events, seal)
+    assert trax.verify_segment_seal_k8_for_context(context, events, seal)
+    wrong_context = trax.TrustedSessionContext.from_verified_state(
+        trax.hash32(b"wrong session"), receiver_id, lineage["public_key"], genesis_tip
+    )
+    assert not trax.verify_segment_seal_k8_for_context(wrong_context, events, seal)
     admitted = window.verify_and_commit(seal)
     assert admitted == events
     assert window.provisional_count() == 0

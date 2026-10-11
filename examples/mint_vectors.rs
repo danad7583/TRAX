@@ -23,8 +23,10 @@ fn save(name: &str, bytes: &[u8]) {
 }
 
 fn cose_sign_payload(sk: &SigningKey, payload: &[u8]) -> Vec<u8> {
-    let mut header = Header::default();
-    header.alg = Some(Algorithm::Assigned(iana::Algorithm::EdDSA));
+    let header = Header {
+        alg: Some(Algorithm::Assigned(iana::Algorithm::EdDSA)),
+        ..Default::default()
+    };
 
     let signature = sk.sign(payload).to_bytes().to_vec();
     let sign1 = CoseSign1 {

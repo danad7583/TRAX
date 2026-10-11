@@ -84,6 +84,42 @@ breaking tip/counter continuity, or failing signature verification rejects the w
 Failure commits zero provisional events and leaves the committed DAG state unchanged. Partial
 windows MUST remain provisional and MUST NOT be promoted implicitly at end of session.
 
+`receiver_id` has one normative meaning in this profile:
+`H("TRAX:RECEIVER-ID:V1\\0" || receiver_lineage_public_key)`. It identifies the stable receiving
+trust identity and MUST NOT be derived from an ephemeral transport or future transmission key.
+
+### K=8 Rust admission API
+
+`PostGenesisEventV1` commits to session, lineage and receiver identities, segment/counter
+position, previous tip, content hash, and payload hash. `SegmentCommitmentV1` binds the ordered
+K=8 Merkle root to that context; `SegmentSealV1` authenticates the commitment; `SegmentProof`
+packages the ordered events and seal.
+
+`TrustedSessionContext` privately owns the authoritative session ID, receiver ID, lineage
+verification key, committed tip, segment index, and next counter. A verified `LocalAdmissionDag`
+produces it with `trusted_context_from_latest_packet0()`. Applications restoring independently
+verified state may use the explicitly named `from_verified_state` constructor.
+
+`verify_segment_proof_intrinsic()` checks internal order, continuity, Merkle commitment, and
+signature. It does **not** establish that the segment belongs to the receiver's current session.
+`verify_segment_proof_for_context()` additionally matches admission fields against
+`TrustedSessionContext`. Intrinsic cryptographic validity is not session admission.
+
+`ed25519_sign_merkle_root_k8_raw()` is deliberately named as a low-level bare-root primitive.
+Its output is not a `SegmentSealV1` and MUST NOT be used as proof of TRAX admission. The former
+`ed25519_sign_batch_k8()` name remains only as a deprecated compatibility alias.
+
+`ReceiveAdmissionWindow::stage_with_payload()` hashes actual payload bytes before provisional
+staging. `content_hash` is authenticated by the seal but is not recomputed because this protocol
+version does not yet define which canonical content bytes it represents. After eight valid
+event/payload pairs, `verify_and_commit()` performs context-bound verification and atomically
+returns the admitted events.
+
+The receive window owns active admission state, not permanent DAG history. It retains the trusted
+context, provisional events/tip, and total committed count. Newly committed events are returned
+for external persistence rather than retained indefinitely. The context leaves a clean future
+transition point for authenticated lineage-key rotation; rotation is not implemented here.
+
 ## Dependencies
 
 TRAX is a Rust project and requires the Rust toolchain, including `cargo` and `rustc`.
@@ -219,6 +255,7 @@ assert (
 
 dag = trax.LocalDag()
 node_id = dag.admit_packet0(envelope, payload, receiver["public_key"])
+trusted = dag.trusted_context_from_latest_packet0()
 
 assert len(node_id) == 32
 assert len(dag) == 1
@@ -304,6 +341,45 @@ Returns the number of local admitted Packet 0 DAG nodes.
 `LocalDag.is_empty() -> bool`
 
 Returns whether the local in-memory DAG has no admitted Packet 0 nodes.
+
+`receiver_id(receiver_lineage_public_key: bytes) -> bytes`
+
+Derives the domain-separated stable receiver identity used by post-genesis commitments.
+
+`LocalDag.trusted_context_from_latest_packet0() -> TrustedSessionContext`
+
+Produces opaque authoritative post-genesis context from the latest admitted Packet 0.
+
+`TrustedSessionContext.from_verified_state(...) -> TrustedSessionContext`
+
+Restores opaque context from state the application has already verified and persisted. Its fields
+are readable through accessors but cannot be mutated directly from Python.
+
+`ReceiveAdmissionWindow(context: TrustedSessionContext)`
+
+Creates Rust-owned K=8 receiver state. It retains active admission state, not permanent history.
+
+`ReceiveAdmissionWindow.stage(event: bytes, payload: bytes) -> bytes`
+
+Verifies actual payload bytes plus event context, counter, and provisional-tip continuity before
+staging. Failure leaves the provisional count unchanged.
+
+`create_segment_seal_k8(private_key: PrivateKey, events: list[bytes]) -> bytes`
+
+Creates a signed, context-bound `SegmentSealV1` for exactly eight ordered events.
+
+`verify_segment_seal_k8_intrinsic(public_key, events, seal) -> bool`
+
+Checks internal cryptographic validity only. A true result is not session admission.
+
+`verify_segment_seal_k8_for_context(context, events, seal) -> bool`
+
+Performs admission-grade verification against opaque trusted session context.
+
+`ReceiveAdmissionWindow.verify_and_commit(seal: bytes) -> list[bytes]`
+
+Atomically admits and returns exactly eight event encodings. Failure advances no committed state
+and releases no events.
 
 ## Test
 

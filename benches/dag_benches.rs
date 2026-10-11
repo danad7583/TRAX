@@ -3,7 +3,8 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ed25519_dalek::SigningKey;
 use trax::crypto::hash32;
 use trax::dag::{
-    create_segment_seal_k8, event_tip, lineage_key_id, ordered_merkle_root, verify_segment_proof,
+    create_segment_seal_k8, event_tip, lineage_key_id, ordered_merkle_root,
+    verify_segment_proof_intrinsic,
 };
 use trax::{PostGenesisEventV1, SegmentProof};
 
@@ -44,9 +45,9 @@ fn benches(c: &mut Criterion) {
     };
     c.bench_function("verify_signed_k8_segment", |b| {
         b.iter(|| {
-            black_box(
-                verify_segment_proof(black_box(&proof), black_box(&key.verifying_key())).unwrap(),
-            )
+            verify_segment_proof_intrinsic(black_box(&proof), black_box(&key.verifying_key()))
+                .unwrap();
+            black_box(())
         })
     });
 }

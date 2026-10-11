@@ -52,12 +52,26 @@ pub fn ed25519_verify(vk: &VerifyingKey, msg: &[u8], sig: &[u8]) -> bool {
 }
 
 #[cfg(feature = "crypto-ed25519")]
-pub fn ed25519_sign_batch_k8(
+/// Signs only a bare K=8 Merkle root. This low-level primitive is **not** a
+/// TRAX segment seal because it does not bind session or lineage context.
+/// Use `crate::dag::create_segment_seal_k8` for protocol admission.
+pub fn ed25519_sign_merkle_root_k8_raw(
     sk: &SigningKey,
     messages: &[Vec<u8>],
 ) -> Result<(Vec<u8>, MerkleProofs), TraxError> {
     let (root_hash, proofs) = merkle_root_and_proofs_k8(messages)?;
     Ok((sk.sign(&root_hash).to_bytes().to_vec(), proofs))
+}
+
+#[deprecated(
+    since = "0.1.0",
+    note = "bare-root signing is not a TRAX seal; use ed25519_sign_merkle_root_k8_raw or create_segment_seal_k8"
+)]
+pub fn ed25519_sign_batch_k8(
+    sk: &SigningKey,
+    messages: &[Vec<u8>],
+) -> Result<(Vec<u8>, MerkleProofs), TraxError> {
+    ed25519_sign_merkle_root_k8_raw(sk, messages)
 }
 
 pub fn merkle_root_k8(messages: &[Vec<u8>]) -> Result<[u8; 32], TraxError> {

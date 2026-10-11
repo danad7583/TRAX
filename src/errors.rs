@@ -36,6 +36,8 @@ pub enum TraxError {
     SessionMismatch,
     #[error("Receiver mismatch")]
     ReceiverMismatch,
+    #[error("Payload hash mismatch")]
+    PayloadHashMismatch,
     #[error("Segment already complete")]
     SegmentAlreadySealed,
     #[error("Incomplete segment")]
