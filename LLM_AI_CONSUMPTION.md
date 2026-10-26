@@ -1,448 +1,82 @@
-# LLM / AI Consumption Guide for TRAX
+# TRAX implementation guide
 
-This document provides copy/paste prompts for developers, reviewers, researchers, and security engineers who want to use an LLM to understand the TRAX repository quickly.
+Use source, tests, [README.md](README.md), and [docs/DAG.md](docs/DAG.md) as evidence. Do not infer a complete protocol from module names, benchmark labels, or requirement IDs.
 
-TRAX stands for **Trust Resolution and Agent eXchange**.
+## Scope and layers
 
-TRAX is a Rust-based cryptographic trust layer for verifiable agent-to-agent communication. It resolves trust from signed history, DAG continuity, replay protection, key continuity, and challenge-response behavior rather than from identity alone.
+TRAX is a library for deterministic DAG records, insertion/verification, explicit-cadence signed checkpoints, key authority, and durable history. Applications supply networking, connections, request routing, models/tools, policy decisions, and reactions to verification failures. TRAX does not determine malicious intent or send alerts.
 
-Use these prompts with your preferred LLM by pasting the prompt and attaching or referencing the relevant repository files.
+Keep these layers distinct:
 
----
+1. `PairDag` represents common immutable relationship history mirrored by peers, with explicit forks, shared configuration, independent checkpoint attestations, and durable replay verification.
+2. `dag::TrustedSessionContext` and `ReceiveAdmissionWindow` are same-author, same-receiver session-batch helpers. Directional admission windows do not imply unrelated logical DAGs.
+3. `LocalAdmissionDag` is a process-local Packet0 helper, not persistent pair storage or distributed synchronization.
+4. Python bindings expose Rust-backed crypto/Packet0/session-window operations, not an agent host.
 
-## 1. Fast Project Summary
+## Breaking representation change
 
-```text
-You are reviewing a Rust repository named TRAX.
+Version 0.2 uses strict length-first deterministic CBOR: recursive encoded-length/byte map-key ordering, duplicate rejection, and exactly one canonical item. This replaces declaration/insertion-order prototype encoding.
 
-TRAX stands for Trust Resolution and Agent eXchange. It is a cryptographic trust layer for verifiable agent-to-agent communication. It uses signed DAG-based history, canonical CBOR encoding, COSE-oriented message structure, replay protection, key rotation continuity, session binding, challenge-response validation, and K-window segment proofs.
+Old prototype V1 bytes, hashes, node IDs, proofs, and signatures must not be carried into the new profile. There is no automatic migration. Retaining a V1 type name does not preserve encoding compatibility. The durable journal is version 3 for the new exchange-proof format. New shared-graph records/proofs are portable between builds supporting their selected algorithms; the legacy hash32 feature cannot silently change them. Verify against the profile recorded in genesis or the applicable configuration action. Legacy helper outputs still belong to their selected compile-time hash profile.
 
-Please summarize what this repository does in plain English for a developer who has not read the code. Explain what problem TRAX solves, what it does not solve, and how it differs from a normal message-signing library.
-```
+## Explicit shared protocol configuration
 
----
+The host's authenticated genesis agreement binds one shared `ProtocolConfig`; the library validates it rather than performing network negotiation. `with_default_k(signing_algorithm, hash_algorithm)` selects K=8, while `new(k, signing_algorithm, hash_algorithm)` accepts an explicit override. Shared K must be greater than 4 (minimum 5) and fit u32. Algorithms remain explicit: supported signing is Ed25519; runtime hash selection is Blake3 or Sha512256. SHA-512/256 is always available and BLAKE3 requires the compiled feature. Unsupported selections fail rather than falling back. Serialization requires K and both algorithm fields, rejects unknown fields/algorithms, and validates K/build availability during deserialization. Omitting K does not select the construction helper's default.
 
-## 2. Architecture Explanation
+All DAG events across all branches count toward shared K, including forks, rotations, configuration actions, control records, and padding. All remain provisional until a full checkpoint commits. An ordinary mixed-author segment requires one authorized participant's checkpoint signature. This attests the signer's DAG view, not every named author's independent signature or a network address. Rotation, configuration and closure have the additional bilateral requirements below.
 
-```text
-Review this TRAX repository as a protocol architecture.
+`rotate(author, parent, branch, &old_key, &new_key)` starts at node 1 of a fresh segment on a new branch and requires current old-key authorization plus replacement-key possession proof. The peer's `acknowledge_and_pad(peer, &peer_key)` fills positions through K−2 with padding, records `Acknowledge` at K−1 and signs the exact prefix. The initiator replays that prefix and uses `accept_ack(&proof)`, then `finish_close()` to place `CloseConfirm` at K or `append` a real request in the final slot to continue. The final checkpoint must be signed by the initiator's current key: its replacement key after rotation. The unchanged peer and retired old key cannot finalize that exchange.
 
-Explain the major components and how they relate to each other:
+The detached K−1 proof is not an ordinary checkpoint and admits no partial history. `GraphSegmentProof.acknowledgment` embeds it; its hash is bound into the final checkpoint and close confirmation. `acknowledgment_for(proposal)` retrieves the peer evidence after commit. Both acknowledgment and full checkpoint must validate before accepted state advances.
 
-- canonical encoding
-- crypto operations
-- session binding
-- DAG nodes
-- segment proofs
-- replay protection
-- key rotation / quarantine
-- rate limiting
-- AAIP signed-message scenario
-- TRAX trust-resolution layer
+`configure` is a current-key-authorized fork proposal at the first event of a fresh segment. The proposal and its exchange immediately use the new K/hash profile, while the old configuration tip and current key authorize the change. For old K=8 to new K=5, the prefix has four events and the initiator's final event is five. The accepted current configuration changes globally only on verified full commit, including later live continuations of older branches. Rotation changes only that participant's accepted key authority on commit; historical profiles and keys remain recorded.
 
-Focus on the difference between identity, message authenticity, and trust resolution.
-```
+No request/roundtrip or full ordinary segment is padded automatically. `request_close(author, branch)` explicitly opens a close proposal only when at least three slots remain; its peer acknowledgment step supplies filler. The final slot may carry a real request instead of close confirmation. Mutual protocol evidence cannot force a physical peer to stay connected.
 
----
+Independent detached full-checkpoint attestations are retained with history; `checkpoint_for(participant, node_hash)` may retrieve an earlier proof after later records exist. Keep full checkpoints distinct from the exchange's detached prefix acknowledgment. Do not impose two signatures on ordinary full checkpoints or per-participant K at genesis.
 
-## 3. AAIP vs TRAX Boundary
+## Separate same-author helpers
 
-```text
-This repository contains references to both AAIP and TRAX.
+`SegmentConfig::new(k)` remains for legacy same-author session batching. K must be positive and fit u32; K=1 and odd sizes work. These helpers do not define the common graph's checkpoint signer policy.
 
-Please explain the intended architectural boundary:
+Same-author session APIs:
 
-- AAIP refers to the lower signed-message or packet exchange layer.
-- TRAX refers to the trust-resolution layer built around DAG history, cryptographic continuity, replay protection, key rotation, and segment proofs.
+- `LocalAdmissionDag::new(config)`
+- `TrustedSessionContext::from_verified_state(config, ...)`
+- `ReceiveAdmissionWindow::new(context) -> Result<...>`
+- `create_segment_seal(config, key, events)`
+- `verify_segment_proof_intrinsic(config, proof, key)`
+- `verify_segment_proof_for_context(proof, context)`
+- `ordered_merkle_root(config, events)`
 
-Identify whether any AAIP references appear intentional or whether they look like stale naming that should be renamed to TRAX.
-```
+Receivers enforce configured K against signed K. Staging remains provisional until a complete valid segment commits atomically. There is no partial commit or automatic padding. Restored count and counter/segment increments are checked for overflow. Restored context must already have been independently verified.
 
----
+Shared-graph `profile::merkle_root` takes explicit ProtocolConfig, selects the runtime hash, computes only a root, and does not clone leaf payloads or construct proofs. The internal prefix root uses exactly K−1 leaves under the same profile. Legacy generic Merkle APIs take explicit SegmentConfig and support K=1, unlike shared ProtocolConfig. Odd final nodes are promoted unchanged; no duplicate/artificial leaves are introduced. Legacy inclusion proofs omit promotion levels and must match the exact path implied by K/index. Bare-root signatures, including explicit K8 raw helpers, are not admission seals.
 
-## 4. Security Model Review
+## Helpers versus scaffolding
 
-```text
-Review the TRAX repository from a security engineering perspective.
+- Ed25519, hashing, Merkle commitments/proofs, and HKDF derivation are implemented helpers.
+- Session derivation consumes supplied context/nonces and optional supplied shared-secret bytes; it is not an on-wire handshake.
+- `crypto-x25519` is a dependency feature, not an implemented exchange/encryption stack.
+- `rate::TokenBucket` works when the caller invokes it; no host policy is supplied.
+- `replay::LastSeen` does not implement complete in-window duplicate filtering.
+- Legacy rotation/quarantine types do not implement quarantine. Paired-DAG recorded key authority is separate.
+- `encoding::cose_sign1` returns an explicit unsupported-operation error.
+- The `no_std` feature name is not a working no-std guarantee.
+- Historical vectors include placeholders; presence/nonempty contents are not proof of conformance.
 
-Identify the security assumptions, trust boundaries, and likely threat model. Focus on:
+## Validation and performance
 
-- replay prevention
-- nonce or counter handling
-- DAG continuity
-- signed history
-- key rotation continuity
-- challenge-response validation
-- quarantine behavior
-- rate limiting
-- separation of identity from trust
+~~~sh
+cargo test
+cargo check --all-targets
+cargo bench --bench dag_benches
+~~~
 
-Then identify what this repository does not currently prove or protect against.
-```
+Python needs an extension build and separate pytest run. Default Cargo tests do not execute Python tests.
 
----
+Inspect assertions: the deterministic-CBOR conformance test checks fixed expected bytes and a roundtrip; broader canonical checks live in `tests/encoding.rs`. Legacy segment tests exercise K1/3/4/5/8/14, odd Merkle paths, cross-K rejection, incomplete windows, and checked arithmetic. Shared profile tests reject K≤4. Shared graph and handshake tests cover ordinary checkpoints, old/new rotation proofs, detached peer prefix acknowledgment, final initiator authority, tampering/replay, continuation instead of closure, and configuration changes using new K immediately.
 
-## 5. Cryptography Review
+Do not reuse historical latency/throughput/speedup figures from the prototype. Its XOR cumulative-hash check was not authenticated segment verification. Local crypto measurements do not establish end-to-end networking/model performance.
 
-```text
-Review the cryptographic usage in this TRAX repository.
-
-Focus on:
-
-- Ed25519 signing
-- K=8 Merkle batch signing
-- hash usage
-- HKDF usage
-- SHA-2 / SHA-512 dependency usage
-- BLAKE3 usage
-- COSE Sign1-oriented message structure
-- deterministic encoding assumptions
-
-Call out any places where the implementation appears to be scaffolding, demo code, or not yet production-hardened cryptographic behavior.
-```
-
----
-
-## 6. Benchmark Interpretation
-
-```text
-TRAX currently has benchmark results approximately as follows:
-
-- verify_last_8_nodes: ~1.55 microseconds
-- verify_last_16_nodes: ~3.15 microseconds
-- verify_last_32_nodes: ~6.15 microseconds
-- verify_last_64_nodes: ~12.29 microseconds
-- verify_last_128_nodes: ~24.69 microseconds
-- verify_last_256_nodes: ~49.33 microseconds
-- sign_8_nodes_individual_ed25519: ~183.9 microseconds
-- sign_batch_k8_merkle_root_ed25519: ~26.8 microseconds
-
-Explain what these benchmarks mean. Compare verification cost, individual signing cost, and K=8 Merkle batch signing cost. Explain why nanosecond-range performance is realistic for hashing and memory operations but not for public-key signing.
-```
-
----
-
-## 7. Firmware / Runtime Security Comparison
-
-```text
-Compare TRAX performance and architecture to common firmware security patterns.
-
-TRAX performs K=8 Merkle batch signing in about 26.8 microseconds per 8-node batch and verifies an 8-node segment proof in about 1.55 microseconds.
-
-Compare this approach to:
-
-- secure boot
-- measured boot
-- TPM PCR extension chains
-- firmware image verification
-- runtime attestation
-- per-message signing
-
-Explain why TRAX is better understood as runtime trust validation rather than classic boot-time firmware verification.
-```
-
----
-
-## 8. Codebase Tour
-
-```text
-Give me a codebase tour of this TRAX repository.
-
-Explain the purpose of each major folder and file:
-
-- src/
-- tests/
-- benches/
-- examples/
-- docker/
-- vectors/
-- docs/
-- Cargo.toml
-- README.md
-- RUNBOOK.md
-
-Then suggest where a new developer should start reading first.
-```
-
----
-
-## 9. Conformance Test Review
-
-```text
-Review the TRAX conformance tests.
-
-The known passing tests are:
-
-- req_3_1_1_deterministic_cbor
-- req_4_1_2_session_id_binding
-- req_5_1_1_segment_proof_validates
-
-Explain what each test likely validates and what additional conformance tests should be added next for a stronger protocol validation suite.
-```
-
----
-
-## 10. Signing Test Recommendation
-
-```text
-TRAX has verification and segment proof tests. Recommend additional signing tests.
-
-Please propose Rust test cases for:
-
-- Ed25519 sign/verify round trip
-- tampered message rejection
-- wrong public key rejection
-- malformed signature rejection
-- K=8 batch signing validation
-- deterministic test vector generation
-
-Keep the tests compatible with a Rust Cargo project using ed25519-dalek.
-```
-
----
-
-## 11. Public GitHub Readiness Review
-
-```text
-Review this TRAX repository for public GitHub readiness.
-
-Check for:
-
-- stale AAICP terminology
-- intentional AAIP terminology
-- build artifacts that should be ignored
-- missing license
-- README clarity
-- RUNBOOK usefulness
-- benchmark claim safety
-- security disclaimer quality
-- dependency documentation
-- Windows and Linux build prerequisites
-
-Provide a prioritized list of fixes before public release.
-```
-
----
-
-## 12. README Quality Review
-
-```text
-Review the README.md for TRAX.
-
-Determine whether a new developer can quickly answer:
-
-- What is TRAX?
-- What problem does it solve?
-- How do I build it?
-- How do I test it?
-- How do I benchmark it?
-- What do the benchmarks mean?
-- What dependencies are required on Windows and Linux?
-- What parts are experimental?
-- What does AAIP mean inside this repo?
-
-Suggest concise edits only.
-```
-
----
-
-## 13. RUNBOOK Review
-
-```text
-Review RUNBOOK.md for TRAX.
-
-Determine whether it gives a maintainer enough information to:
-
-- validate local dependencies
-- build the project
-- run tests
-- run benchmarks
-- check terminology
-- confirm .gitignore behavior
-- prepare a commit
-- push to a remote repository
-
-Suggest missing operational checks or unnecessary sections.
-```
-
----
-
-## 14. Threat Modeling Prompt
-
-```text
-Perform a threat model for TRAX.
-
-Assume TRAX is used for autonomous agent-to-agent communication where agents exchange signed messages and maintain DAG-based trust history.
-
-Analyze threats including:
-
-- replay attacks
-- message forgery
-- key compromise
-- malicious key rotation
-- DAG fork or injection
-- stale node reuse
-- denial of service
-- rate-limit bypass
-- malformed CBOR/COSE inputs
-- compromised peer identity
-- trusted history poisoning
-
-For each threat, describe the mitigation present in TRAX if visible, and identify any missing controls.
-```
-
----
-
-## 15. Performance Claim Safety
-
-```text
-Review these proposed TRAX performance claims for accuracy and safety:
-
-- TRAX verifies an 8-node segment proof in approximately 1.55 microseconds.
-- TRAX performs K=8 Merkle batch signing in approximately 26.8 microseconds per 8-node batch.
-- K=8 Merkle batch signing is approximately 6.8x faster than signing 8 nodes individually.
-- TRAX reaches approximately 298,000 signed node-equivalents per second in the measured K=8 batch-signing path.
-
-Explain which claims are safe, which need qualifiers, and what environment details should be included.
-```
-
----
-
-## 16. Contributor Onboarding
-
-```text
-I am a new contributor to TRAX.
-
-Explain how to get productive quickly:
-
-- what TRAX does
-- what to read first
-- how to build
-- how to test
-- how to benchmark
-- how to avoid confusing AAIP and TRAX terminology
-- what areas likely need more work
-- what kind of pull requests would be useful
-```
-
----
-
-## 17. Documentation Consistency Check
-
-```text
-Scan the TRAX documentation for consistency.
-
-Check whether the following terms are used correctly:
-
-- TRAX
-- Trust Resolution and Agent eXchange
-- AAIP
-- DAG
-- segment proof
-- K-window
-- K=8 Merkle batch signing
-- Ed25519
-- canonical CBOR
-- COSE Sign1
-- replay protection
-- session binding
-- key rotation
-- quarantine
-
-Flag inconsistent, stale, or ambiguous terminology.
-```
-
----
-
-## 18. Minimal Executive Summary
-
-```text
-Write a short executive summary of TRAX for a technical decision-maker.
-
-Keep it under 200 words.
-
-Include:
-
-- what TRAX is
-- why signed history matters
-- why identity alone is not trust
-- what the K=8 batch-signing benchmark shows
-- why this is relevant to autonomous agent communication
-```
-
----
-
-## 19. Deep Technical Summary
-
-```text
-Write a deep technical summary of TRAX for a security architect.
-
-Cover:
-
-- protocol objective
-- identity vs trust
-- signed message exchange
-- DAG-based trust chain
-- segment proof verification
-- replay protection
-- session binding
-- key rotation continuity
-- K=8 Merkle batch signing
-- benchmark interpretation
-- current limitations
-- future hardening work
-```
-
----
-
-## 20. Pull Request Review Prompt
-
-```text
-You are reviewing a pull request for the TRAX repository.
-
-Review the changes for:
-
-- protocol correctness
-- cryptographic safety
-- deterministic encoding behavior
-- replay protection impact
-- DAG integrity impact
-- test coverage
-- benchmark impact
-- terminology consistency
-- README/RUNBOOK updates
-- public API stability
-
-Return a structured PR review with blockers, warnings, suggestions, and approved items.
-```
-
----
-
-## Recommended First Prompt
-
-For most developers, start with this:
-
-```text
-You are reviewing a Rust repository named TRAX.
-
-TRAX stands for Trust Resolution and Agent eXchange. It is a cryptographic trust layer for verifiable agent-to-agent communication. It resolves trust from signed DAG history, replay protection, key continuity, session binding, challenge-response behavior, and K-window segment proofs.
-
-Please explain what this project does, how AAIP and TRAX differ, how the main source files likely fit together, and what I should read first as a developer.
-```
-
----
-
-## Notes for LLM Use
-
-LLM output should be treated as review assistance, not as authoritative protocol validation.
-
-For security-sensitive changes, use LLM output only as a supplement to:
-
-* code review
-* cryptographic review
-* test validation
-* benchmark validation
-* threat modeling
-* independent implementation review
-
-TRAX is experimental research and development software. It should not be treated as production-ready cryptographic infrastructure without independent review and formal validation.
+Before claiming paired-DAG/storage behavior or test status, inspect the current implementation and actual validation results. Do not fill in missing host behavior.

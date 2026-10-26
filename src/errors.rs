@@ -10,6 +10,8 @@ pub enum TraxError {
     Crypto,
     #[error("Invalid input: {0}")]
     InvalidInput(&'static str),
+    #[error("Unsupported signing or hash algorithm")]
+    UnsupportedAlgorithm,
     #[error("Bad signature")]
     BadSignature,
     #[error("Stale counter")]
@@ -42,4 +44,34 @@ pub enum TraxError {
     SegmentAlreadySealed,
     #[error("Incomplete segment")]
     IncompleteSegment,
+    #[error("Arithmetic overflow")]
+    ArithmeticOverflow,
+    #[error("Unknown DAG node or parent")]
+    UnknownNode,
+    #[error("Unknown branch")]
+    UnknownBranch,
+    #[error("Branch already exists")]
+    BranchExists,
+    #[error("Node does not extend the branch tip")]
+    BranchTipMismatch,
+    #[error("Unknown relationship participant")]
+    UnknownParticipant,
+    #[error("Signing key has been retired")]
+    RetiredKey,
+    #[error("Key epoch or rotation reference is not current")]
+    AuthorityMismatch,
+    #[error("Key has already been used in this relationship")]
+    KeyReuse,
+    #[error("DAG or configuration mismatch")]
+    GraphContextMismatch,
+    #[error("Duplicate DAG node")]
+    DuplicateNode,
+    #[error("Checkpoint signer coverage mismatch")]
+    SignerMismatch,
+    #[error("Storage error: {0}")]
+    Storage(#[from] std::io::Error),
+    #[error("Journal is incomplete or corrupt")]
+    CorruptJournal,
+    #[error("Journal write failed; reopen and inspect before further writes")]
+    JournalPoisoned,
 }

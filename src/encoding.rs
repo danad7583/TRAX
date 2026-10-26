@@ -1,44 +1,88 @@
-//! Canonical encoding: CBOR with deterministic encoding, COSE_Sign1 container.
+//! Strict, length-first deterministic CBOR.
+//!
+//! Maps are sorted recursively by the length and then the lexical order of each
+//! encoded key. Duplicate encoded keys are rejected. The decoder accepts exactly
+//! one item and requires its bytes to match this deterministic representation.
+//!
+//! This replaces the prototype's declaration/insertion-order map encoding. Even
+//! existing V1 structs therefore have different bytes, hashes, and signing
+//! transcripts; old prototype proofs must not be carried into this profile.
 use crate::errors::TraxError;
 use crate::types::ProtectedHeaders;
 use ciborium::de;
 use ciborium::ser;
-use coset::{self, iana, Algorithm, CoseSign1, Header, ProtectedHeader};
-use std::io::Write;
+use ciborium::value::Value;
 
 pub fn encode_deterministic<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, TraxError> {
-    let mut buf = vec![];
-    ser::into_writer(value, &mut buf).map_err(|_| TraxError::Cbor)?;
-    Ok(buf)
+    let mut value = Value::serialized(value).map_err(|_| TraxError::Cbor)?;
+    normalize(&mut value)?;
+    encode_value(&value)
 }
 
 pub fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, TraxError> {
-    let v: T = de::from_reader(data).map_err(|_| TraxError::Cbor)?;
-    Ok(v)
+    let mut remaining = data;
+    let mut value: Value = de::from_reader(&mut remaining).map_err(|_| TraxError::Cbor)?;
+    if !remaining.is_empty() {
+        return Err(TraxError::Cbor);
+    }
+    normalize(&mut value)?;
+    if encode_value(&value)? != data {
+        return Err(TraxError::Cbor);
+    }
+    value.deserialized().map_err(|_| TraxError::Cbor)
 }
 
+fn encode_value(value: &Value) -> Result<Vec<u8>, TraxError> {
+    let mut bytes = Vec::new();
+    ser::into_writer(value, &mut bytes).map_err(|_| TraxError::Cbor)?;
+    Ok(bytes)
+}
+
+fn normalize(value: &mut Value) -> Result<(), TraxError> {
+    match value {
+        Value::Map(entries) => {
+            let mut ordered = Vec::with_capacity(entries.len());
+            for (mut key, mut value) in std::mem::take(entries) {
+                normalize(&mut key)?;
+                normalize(&mut value)?;
+                ordered.push((encode_value(&key)?, key, value));
+            }
+            ordered.sort_unstable_by(|left, right| {
+                left.0
+                    .len()
+                    .cmp(&right.0.len())
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            if ordered.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(TraxError::Cbor);
+            }
+            *entries = ordered
+                .into_iter()
+                .map(|(_, key, value)| (key, value))
+                .collect();
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize(value)?;
+            }
+        }
+        Value::Tag(_, value) => normalize(value)?,
+        // Ciborium selects the shortest exact floating-point representation.
+        // Collapse NaN payloads/signs to one representation as well.
+        Value::Float(number) if number.is_nan() => *number = f64::NAN,
+        _ => {}
+    }
+    Ok(())
+}
+
+/// COSE signing is not implemented by this helper. Admission envelopes and
+/// segment seals use their explicit Ed25519 signing APIs instead.
 pub fn cose_sign1(
     _headers: &ProtectedHeaders,
-    payload: &[u8],
+    _payload: &[u8],
     _key: &[u8],
 ) -> Result<Vec<u8>, TraxError> {
-    // Placeholder: integrate ed25519-dalek signing and build CoseSign1 with protected headers.
-    use coset::CborSerializable;
-    let h = Header {
-        alg: Some(Algorithm::Assigned(iana::Algorithm::EdDSA)),
-        ..Default::default()
-    };
-    let sign1 = CoseSign1 {
-        protected: ProtectedHeader {
-            original_data: None,
-            header: h,
-        },
-        unprotected: Header::default(),
-        payload: Some(payload.to_vec()),
-        signature: vec![],
-    };
-    let mut out: Vec<u8> = Vec::new();
-    let bytes = sign1.to_vec().map_err(|_| TraxError::Cbor)?;
-    out.write_all(&bytes).map_err(|_| TraxError::Cbor)?;
-    Ok(out)
+    Err(TraxError::InvalidInput(
+        "COSE_Sign1 signing is not implemented",
+    ))
 }

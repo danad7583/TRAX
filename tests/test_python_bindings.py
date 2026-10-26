@@ -207,7 +207,7 @@ def test_local_dag_admits_verified_packet0_only():
         payload,
         "packet0.admission",
     )
-    dag = trax.LocalDag()
+    dag = trax.LocalDag(3)
 
     assert dag.is_empty() is True
     assert len(dag) == 0
@@ -224,13 +224,14 @@ def test_local_dag_admits_verified_packet0_only():
     assert trusted.session_id() == trax.hash32(b"session transcript")
     assert trusted.receiver_id() == trax.receiver_id(receiver["public_key"])
     assert trusted.committed_tip() == node_id
+    assert trusted.k() == 3
 
-    tampered_dag = trax.LocalDag()
+    tampered_dag = trax.LocalDag(3)
     with pytest.raises(ValueError):
         tampered_dag.admit_packet0(envelope, b"tampered", receiver["public_key"])
     assert tampered_dag.len() == 0
 
-    wrong_receiver_dag = trax.LocalDag()
+    wrong_receiver_dag = trax.LocalDag(3)
     with pytest.raises(ValueError):
         wrong_receiver_dag.admit_packet0(
             envelope, payload, wrong_receiver["public_key"]
@@ -238,22 +239,24 @@ def test_local_dag_admits_verified_packet0_only():
     assert wrong_receiver_dag.len() == 0
 
 
-def test_k8_receive_window_keeps_first_seven_events_provisional():
+@pytest.mark.parametrize("k", [1, 3, 8])
+def test_receive_window_uses_explicit_k_and_keeps_partial_segments_provisional(k):
     lineage = trax.generate_keypair()
     session_id = trax.hash32(b"segment session")
     receiver = trax.generate_keypair()
     receiver_id = trax.receiver_id(receiver["public_key"])
     genesis_tip = trax.hash32(b"packet zero root")
     context = trax.TrustedSessionContext.from_verified_state(
-        session_id, receiver_id, lineage["public_key"], genesis_tip
+        session_id, receiver_id, lineage["public_key"], genesis_tip, k=k
     )
+    assert context.k() == k
     window = trax.ReceiveAdmissionWindow(context)
     with pytest.raises(ValueError):
         window.stage(b"malformed cbor", b"payload")
     assert window.provisional_count() == 0
     events = []
     tip = genesis_tip
-    for counter in range(8):
+    for counter in range(k):
         payload = f"payload-{counter}".encode()
         event = trax.create_post_genesis_event_v1(
             session_id,
@@ -271,20 +274,63 @@ def test_k8_receive_window_keeps_first_seven_events_provisional():
                 window.stage(event, b"tampered")
             assert window.provisional_count() == 0
         tip = window.stage(event, payload)
-        if counter < 7:
+        if counter < k - 1:
             assert window.committed_count() == 0
             assert window.committed_tip() == genesis_tip
 
-    assert window.provisional_count() == 8
-    seal = trax.create_segment_seal_k8(lineage["private_key"], events)
-    assert trax.verify_segment_seal_k8_intrinsic(lineage["public_key"], events, seal)
-    assert trax.verify_segment_seal_k8_for_context(context, events, seal)
-    wrong_context = trax.TrustedSessionContext.from_verified_state(
-        trax.hash32(b"wrong session"), receiver_id, lineage["public_key"], genesis_tip
+    assert window.provisional_count() == k
+    seal = trax.create_segment_seal(lineage["private_key"], events, k)
+    incomplete_window = trax.ReceiveAdmissionWindow(context)
+    for counter, event in enumerate(events[:-1]):
+        incomplete_window.stage(event, f"payload-{counter}".encode())
+    with pytest.raises(ValueError, match="Incomplete segment"):
+        incomplete_window.verify_and_commit(seal)
+    assert incomplete_window.provisional_count() == k - 1
+    assert incomplete_window.committed_count() == 0
+    assert incomplete_window.committed_tip() == genesis_tip
+    assert trax.verify_segment_seal_intrinsic(lineage["public_key"], events, seal, k)
+    assert trax.verify_segment_seal_for_context(context, events, seal)
+    assert not trax.verify_segment_seal_intrinsic(
+        lineage["public_key"], events, seal, k + 1
     )
-    assert not trax.verify_segment_seal_k8_for_context(wrong_context, events, seal)
+    wrong_context = trax.TrustedSessionContext.from_verified_state(
+        trax.hash32(b"wrong session"), receiver_id, lineage["public_key"], genesis_tip, k=k
+    )
+    assert not trax.verify_segment_seal_for_context(wrong_context, events, seal)
+    wrong_k_context = trax.TrustedSessionContext.from_verified_state(
+        session_id, receiver_id, lineage["public_key"], genesis_tip, k=k + 1
+    )
+    assert not trax.verify_segment_seal_for_context(wrong_k_context, events, seal)
     admitted = window.verify_and_commit(seal)
     assert admitted == events
     assert window.provisional_count() == 0
-    assert window.committed_count() == 8
+    assert window.committed_count() == k
     assert window.committed_tip() == tip
+
+
+def test_segment_cadence_is_required_and_zero_is_rejected():
+    lineage = trax.generate_keypair()
+    receiver = trax.generate_keypair()
+    state = (
+        trax.hash32(b"explicit cadence session"),
+        trax.receiver_id(receiver["public_key"]),
+        lineage["public_key"],
+        trax.hash32(b"genesis"),
+    )
+    assert not hasattr(trax, "DEFAULT_SEGMENT_K")
+    with pytest.raises(TypeError):
+        trax.LocalDag()
+    with pytest.raises(TypeError):
+        trax.TrustedSessionContext.from_verified_state(*state)
+    with pytest.raises(TypeError):
+        trax.create_segment_seal(lineage["private_key"], [])
+    with pytest.raises(TypeError):
+        trax.verify_segment_seal_intrinsic(lineage["public_key"], [], b"")
+    with pytest.raises(ValueError, match="Invalid segment size"):
+        trax.LocalDag(0)
+    with pytest.raises(ValueError, match="Invalid segment size"):
+        trax.TrustedSessionContext.from_verified_state(*state, k=0)
+    with pytest.raises(ValueError, match="Invalid segment size"):
+        trax.create_segment_seal(lineage["private_key"], [], 0)
+    with pytest.raises(ValueError, match="Invalid segment size"):
+        trax.verify_segment_seal_intrinsic(lineage["public_key"], [], b"", 0)

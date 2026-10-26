@@ -1,6 +1,6 @@
 
 # -------- Builder stage --------
-FROM rust:1.79-slim AS builder
+FROM rust:1.89-slim-bookworm AS builder
 
 # Avoid prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Cache deps first
-COPY Cargo.toml .
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 COPY examples ./examples
 COPY benches ./benches
@@ -22,7 +22,7 @@ COPY vectors ./vectors
 COPY README.md .
 
 # Build with features used in runbook
-RUN cargo build --release --features crypto-ed25519,hash-blake3
+RUN cargo build --locked --release --examples --features crypto-ed25519,hash-blake3
 
 # -------- Runtime stage --------
 FROM debian:bookworm-slim AS runtime

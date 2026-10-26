@@ -32,10 +32,11 @@ struct ReceiveAdmissionWindow {
 #[pymethods]
 impl ReceiveAdmissionWindow {
     #[new]
-    fn new(context: PyRef<'_, TrustedSessionContext>) -> Self {
-        Self {
-            inner: crate::dag::ReceiveAdmissionWindow::new_k8(context.inner.clone()),
-        }
+    fn new(context: PyRef<'_, TrustedSessionContext>) -> PyResult<Self> {
+        Ok(Self {
+            inner: crate::dag::ReceiveAdmissionWindow::new(context.inner.clone())
+                .map_err(trax_error)?,
+        })
     }
 
     fn stage<'py>(
@@ -90,7 +91,7 @@ impl ReceiveAdmissionWindow {
 #[pymethods]
 impl TrustedSessionContext {
     #[staticmethod]
-    #[pyo3(signature = (session_id, receiver_id, lineage_public_key, committed_tip, segment_index=0, next_counter=0))]
+    #[pyo3(signature = (session_id, receiver_id, lineage_public_key, committed_tip, segment_index=0, next_counter=0, *, k))]
     fn from_verified_state(
         session_id: &[u8],
         receiver_id: &[u8],
@@ -98,13 +99,16 @@ impl TrustedSessionContext {
         committed_tip: &[u8],
         segment_index: u64,
         next_counter: u64,
+        k: usize,
     ) -> PyResult<Self> {
+        let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
         let key = parse_verifying_key("lineage_public_key", lineage_public_key)?;
         validate_len("session_id", session_id, HASH32_LEN)?;
         validate_len("receiver_id", receiver_id, HASH32_LEN)?;
         validate_len("committed_tip", committed_tip, HASH32_LEN)?;
         Ok(Self {
             inner: crate::dag::TrustedSessionContext::from_verified_state(
+                config,
                 session_id.try_into().unwrap(),
                 receiver_id.try_into().unwrap(),
                 key,
@@ -130,6 +134,10 @@ impl TrustedSessionContext {
     fn next_counter(&self) -> u64 {
         self.inner.next_counter()
     }
+
+    fn k(&self) -> usize {
+        self.inner.config().k()
+    }
 }
 
 #[pymethods]
@@ -147,10 +155,11 @@ impl PrivateKey {
 #[pymethods]
 impl LocalDag {
     #[new]
-    fn new() -> Self {
-        Self {
-            inner: crate::admission_dag::LocalAdmissionDag::new(),
-        }
+    fn new(k: usize) -> PyResult<Self> {
+        let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
+        Ok(Self {
+            inner: crate::admission_dag::LocalAdmissionDag::new(config),
+        })
     }
 
     fn admit_packet0<'py>(
@@ -254,28 +263,32 @@ fn create_post_genesis_event_v1<'py>(
 }
 
 #[pyfunction]
-fn create_segment_seal_k8<'py>(
+fn create_segment_seal<'py>(
     py: Python<'py>,
     private_key: PyRef<'py, PrivateKey>,
     events: Vec<Vec<u8>>,
+    k: usize,
 ) -> PyResult<Bound<'py, PyBytes>> {
+    let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
     let events = events
         .iter()
         .map(|e| crate::encoding::decode(e))
         .collect::<Result<Vec<_>, _>>()
         .map_err(trax_error)?;
-    let seal = crate::dag::create_segment_seal_k8(&private_key.signing_key, &events)
+    let seal = crate::dag::create_segment_seal(config, &private_key.signing_key, &events)
         .map_err(trax_error)?;
     let bytes = crate::encoding::encode_deterministic(&seal).map_err(trax_error)?;
     Ok(PyBytes::new_bound(py, &bytes))
 }
 
 #[pyfunction]
-fn verify_segment_seal_k8_intrinsic(
+fn verify_segment_seal_intrinsic(
     lineage_public_key: &[u8],
     events: Vec<Vec<u8>>,
     seal: &[u8],
+    k: usize,
 ) -> PyResult<bool> {
+    let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
     use ed25519_dalek::VerifyingKey;
     validate_len(
         "lineage_public_key",
@@ -290,14 +303,16 @@ fn verify_segment_seal_k8_intrinsic(
         .collect::<Result<Vec<_>, _>>()
         .map_err(trax_error)?;
     let seal = crate::encoding::decode(seal).map_err(trax_error)?;
-    Ok(
-        crate::dag::verify_segment_proof_intrinsic(&crate::SegmentProof { events, seal }, &key)
-            .is_ok(),
+    Ok(crate::dag::verify_segment_proof_intrinsic(
+        config,
+        &crate::SegmentProof { events, seal },
+        &key,
     )
+    .is_ok())
 }
 
 #[pyfunction]
-fn verify_segment_seal_k8_for_context(
+fn verify_segment_seal_for_context(
     context: PyRef<'_, TrustedSessionContext>,
     events: Vec<Vec<u8>>,
     seal: &[u8],
@@ -507,14 +522,10 @@ fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PrivateKey>()?;
     module.add_class::<TrustedSessionContext>()?;
     module.add_class::<ReceiveAdmissionWindow>()?;
-    module.add("DEFAULT_SEGMENT_K", crate::dag::DEFAULT_SEGMENT_K)?;
     module.add_function(wrap_pyfunction!(create_post_genesis_event_v1, module)?)?;
-    module.add_function(wrap_pyfunction!(create_segment_seal_k8, module)?)?;
-    module.add_function(wrap_pyfunction!(verify_segment_seal_k8_intrinsic, module)?)?;
-    module.add_function(wrap_pyfunction!(
-        verify_segment_seal_k8_for_context,
-        module
-    )?)?;
+    module.add_function(wrap_pyfunction!(create_segment_seal, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_segment_seal_intrinsic, module)?)?;
+    module.add_function(wrap_pyfunction!(verify_segment_seal_for_context, module)?)?;
     module.add_function(wrap_pyfunction!(receiver_id, module)?)?;
     module.add_function(wrap_pyfunction!(create_admission_envelope_v1, module)?)?;
     module.add_function(wrap_pyfunction!(decode_admission_envelope_v1, module)?)?;

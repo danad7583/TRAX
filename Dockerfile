@@ -1,7 +1,7 @@
 # ======================
 # 1) Build stage
 # ======================
-FROM rust:1.81 AS builder
+FROM rust:1.89-bookworm AS builder
 
 # Set workdir
 WORKDIR /usr/src/trax
@@ -10,7 +10,7 @@ WORKDIR /usr/src/trax
 COPY . .
 
 # Build release binary for an example (aaip_scenario)
-RUN cargo build --release --features crypto-ed25519,hash-blake3 --example aaip_scenario
+RUN cargo build --locked --release --features crypto-ed25519,hash-blake3 --example aaip_scenario
 
 # ======================
 # 2) Runtime stage

@@ -1,12 +1,12 @@
 //! Ordered, signed K-window admission for post-genesis TRAX lineage.
 
-use crate::crypto::{ed25519_sign, ed25519_verify, hash32, merkle_root_k8};
+use crate::config::SegmentConfig;
+use crate::crypto::{ed25519_sign, ed25519_verify, hash32, merkle_root};
 use crate::encoding::encode_deterministic;
 use crate::errors::TraxError;
 use crate::types::{PostGenesisEventV1, SegmentCommitmentV1, SegmentProof, SegmentSealV1};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-pub const DEFAULT_SEGMENT_K: usize = 8;
 pub const POST_GENESIS_EVENT_VERSION: u8 = 1;
 pub const SEGMENT_COMMITMENT_VERSION: u8 = 1;
 const EVENT_DOMAIN: &[u8] = b"TRAX:POST-GENESIS-EVENT:V1\0";
@@ -30,6 +30,7 @@ pub fn receiver_id(receiver_lineage_key: &VerifyingKey) -> [u8; 32] {
 /// boundary. Fields are private so they can only advance through admission.
 #[derive(Debug, Clone)]
 pub struct TrustedSessionContext {
+    config: SegmentConfig,
     session_id: [u8; 32],
     receiver_id: [u8; 32],
     lineage_key: VerifyingKey,
@@ -43,6 +44,7 @@ impl TrustedSessionContext {
     /// Prefer `LocalAdmissionDag::trusted_context_from_latest_packet0` when
     /// Packet 0 was admitted by this crate.
     pub fn from_verified_state(
+        config: SegmentConfig,
         session_id: [u8; 32],
         receiver_id: [u8; 32],
         lineage_key: VerifyingKey,
@@ -51,6 +53,7 @@ impl TrustedSessionContext {
         next_counter: u64,
     ) -> Self {
         Self {
+            config,
             session_id,
             receiver_id,
             lineage_key,
@@ -58,6 +61,10 @@ impl TrustedSessionContext {
             segment_index,
             next_counter,
         }
+    }
+
+    pub fn config(&self) -> SegmentConfig {
+        self.config
     }
 
     pub fn session_id(&self) -> [u8; 32] {
@@ -92,12 +99,15 @@ pub fn event_tip(event: &PostGenesisEventV1) -> Result<[u8; 32], TraxError> {
     Ok(hash32(&material))
 }
 
-pub fn ordered_merkle_root(events: &[PostGenesisEventV1]) -> Result<[u8; 32], TraxError> {
+pub fn ordered_merkle_root(
+    config: SegmentConfig,
+    events: &[PostGenesisEventV1],
+) -> Result<[u8; 32], TraxError> {
     let messages = events
         .iter()
         .map(event_bytes)
         .collect::<Result<Vec<_>, _>>()?;
-    merkle_root_k8(&messages)
+    merkle_root(config, &messages)
 }
 
 pub fn commitment_signing_bytes(commitment: &SegmentCommitmentV1) -> Result<Vec<u8>, TraxError> {
@@ -108,11 +118,12 @@ pub fn commitment_signing_bytes(commitment: &SegmentCommitmentV1) -> Result<Vec<
     Ok(bytes)
 }
 
-pub fn create_segment_seal_k8(
+pub fn create_segment_seal(
+    config: SegmentConfig,
     signing_key: &SigningKey,
     events: &[PostGenesisEventV1],
 ) -> Result<SegmentSealV1, TraxError> {
-    validate_ordered_events(events, DEFAULT_SEGMENT_K)?;
+    validate_ordered_events(events, config.k())?;
     let first = &events[0];
     let last = &events[events.len() - 1];
     if first.lineage_key_id != lineage_key_id(&signing_key.verifying_key()) {
@@ -120,14 +131,14 @@ pub fn create_segment_seal_k8(
     }
     let commitment = SegmentCommitmentV1 {
         version: SEGMENT_COMMITMENT_VERSION,
-        k: DEFAULT_SEGMENT_K as u32,
+        k: config.k() as u32,
         session_id: first.session_id,
         segment_index: first.segment_index,
         first_counter: first.counter,
         last_counter: last.counter,
         starting_committed_tip: first.previous_tip,
         final_provisional_tip: event_tip(last)?,
-        ordered_merkle_root: ordered_merkle_root(events)?,
+        ordered_merkle_root: ordered_merkle_root(config, events)?,
         lineage_key_id: first.lineage_key_id,
         receiver_id: first.receiver_id,
     };
@@ -141,10 +152,11 @@ pub fn create_segment_seal_k8(
 /// Verifies internal cryptographic consistency only. Success does not admit
 /// the proof into any particular trusted session.
 pub fn verify_segment_proof_intrinsic(
+    config: SegmentConfig,
     proof: &SegmentProof,
     expected_key: &VerifyingKey,
 ) -> Result<(), TraxError> {
-    verify_seal_against_events(&proof.events, &proof.seal, expected_key)
+    verify_seal_against_events(config, &proof.events, &proof.seal, expected_key)
 }
 
 /// Verifies both intrinsic validity and membership in the authoritative
@@ -153,7 +165,7 @@ pub fn verify_segment_proof_for_context(
     proof: &SegmentProof,
     context: &TrustedSessionContext,
 ) -> Result<(), TraxError> {
-    verify_segment_proof_intrinsic(proof, context.lineage_key())?;
+    verify_segment_proof_intrinsic(context.config, proof, context.lineage_key())?;
     let c = &proof.seal.commitment;
     if c.session_id != context.session_id {
         return Err(TraxError::SessionMismatch);
@@ -172,15 +184,16 @@ pub fn verify_segment_proof_for_context(
 }
 
 fn verify_seal_against_events(
+    config: SegmentConfig,
     events: &[PostGenesisEventV1],
     seal: &SegmentSealV1,
     expected_key: &VerifyingKey,
 ) -> Result<(), TraxError> {
-    validate_ordered_events(events, DEFAULT_SEGMENT_K)?;
+    validate_ordered_events(events, config.k())?;
     let first = &events[0];
     let last = &events[events.len() - 1];
     let c = &seal.commitment;
-    if c.version != SEGMENT_COMMITMENT_VERSION || c.k as usize != DEFAULT_SEGMENT_K {
+    if c.version != SEGMENT_COMMITMENT_VERSION || c.k as usize != config.k() {
         return Err(TraxError::InvalidSegmentSize);
     }
     if c.session_id != first.session_id
@@ -195,7 +208,7 @@ fn verify_seal_against_events(
     {
         return Err(TraxError::SegmentContextMismatch);
     }
-    if c.ordered_merkle_root != ordered_merkle_root(events)? {
+    if c.ordered_merkle_root != ordered_merkle_root(config, events)? {
         return Err(TraxError::SegmentRootMismatch);
     }
     if !ed25519_verify(expected_key, &commitment_signing_bytes(c)?, &seal.signature) {
@@ -225,7 +238,7 @@ fn validate_ordered_events(events: &[PostGenesisEventV1], k: usize) -> Result<()
                 != previous
                     .counter
                     .checked_add(1)
-                    .ok_or(TraxError::CounterDiscontinuity)?
+                    .ok_or(TraxError::ArithmeticOverflow)?
             {
                 return Err(TraxError::CounterDiscontinuity);
             }
@@ -244,7 +257,6 @@ fn validate_ordered_events(events: &[PostGenesisEventV1], k: usize) -> Result<()
 /// Receiver-owned state separating staged data from trusted history.
 #[derive(Debug)]
 pub struct ReceiveAdmissionWindow {
-    k: usize,
     context: TrustedSessionContext,
     provisional_tip: [u8; 32],
     provisional: Vec<PostGenesisEventV1>,
@@ -252,18 +264,19 @@ pub struct ReceiveAdmissionWindow {
 }
 
 impl ReceiveAdmissionWindow {
-    pub fn new_k8(context: TrustedSessionContext) -> Self {
+    pub fn new(context: TrustedSessionContext) -> Result<Self, TraxError> {
         let provisional_tip = context.committed_tip;
         let committed_count = context
             .segment_index
-            .saturating_mul(DEFAULT_SEGMENT_K as u64);
-        Self {
-            k: DEFAULT_SEGMENT_K,
+            .checked_mul(context.config.k() as u64)
+            .ok_or(TraxError::ArithmeticOverflow)?;
+        Ok(Self {
             context,
             provisional_tip,
-            provisional: Vec::with_capacity(DEFAULT_SEGMENT_K),
+            // Configuration alone must not allocate K events before arrival.
+            provisional: Vec::new(),
             committed_count,
-        }
+        })
     }
 
     /// Validates the received payload before the event can enter provisional state.
@@ -282,7 +295,7 @@ impl ReceiveAdmissionWindow {
         &mut self,
         event: PostGenesisEventV1,
     ) -> Result<[u8; 32], TraxError> {
-        if self.provisional.len() == self.k {
+        if self.provisional.len() == self.context.config.k() {
             return Err(TraxError::SegmentAlreadySealed);
         }
         if event.session_id != self.context.session_id {
@@ -300,7 +313,7 @@ impl ReceiveAdmissionWindow {
             .context
             .next_counter
             .checked_add(self.provisional.len() as u64)
-            .ok_or(TraxError::CounterDiscontinuity)?;
+            .ok_or(TraxError::ArithmeticOverflow)?;
         if event.counter != expected_counter {
             return Err(TraxError::CounterDiscontinuity);
         }
@@ -317,9 +330,26 @@ impl ReceiveAdmissionWindow {
         &mut self,
         seal: &SegmentSealV1,
     ) -> Result<Vec<PostGenesisEventV1>, TraxError> {
-        if self.provisional.len() != self.k {
+        if self.provisional.len() != self.context.config.k() {
             return Err(TraxError::IncompleteSegment);
         }
+        // Validate every increment before mutating either committed or staged
+        // state. A last-counter/segment overflow cannot partially admit data.
+        let k = self.context.config.k() as u64;
+        let next_segment_index = self
+            .context
+            .segment_index
+            .checked_add(1)
+            .ok_or(TraxError::ArithmeticOverflow)?;
+        let next_counter = self
+            .context
+            .next_counter
+            .checked_add(k)
+            .ok_or(TraxError::ArithmeticOverflow)?;
+        let committed_count = self
+            .committed_count
+            .checked_add(k)
+            .ok_or(TraxError::ArithmeticOverflow)?;
         let proof = SegmentProof {
             events: self.provisional.clone(),
             seal: seal.clone(),
@@ -337,9 +367,9 @@ impl ReceiveAdmissionWindow {
         }
         let admitted = std::mem::take(&mut self.provisional);
         self.context.committed_tip = self.provisional_tip;
-        self.context.segment_index += 1;
-        self.context.next_counter += self.k as u64;
-        self.committed_count += self.k as u64;
+        self.context.segment_index = next_segment_index;
+        self.context.next_counter = next_counter;
+        self.committed_count = committed_count;
         Ok(admitted)
     }
 

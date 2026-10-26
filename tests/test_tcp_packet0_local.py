@@ -36,7 +36,7 @@ def _write_packet0_frame(sock, packet0, payload):
 
 
 def _run_packet0_server(listener, receiver_public_key, result):
-    dag = trax.LocalDag()
+    dag = trax.LocalDag(3)
     try:
         listener.settimeout(SOCKET_TIMEOUT_SECONDS)
         conn, _addr = listener.accept()

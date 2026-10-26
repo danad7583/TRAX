@@ -13,17 +13,17 @@ echo "TRAX container starting with MODE=${MODE}"
 
 case "${MODE}" in
   handshake_client)
-    exec /usr/local/bin/handshake_client
+    exec /usr/local/bin/examples/handshake_client
     ;;
   handshake_server)
-    exec /usr/local/bin/handshake_server
+    exec /usr/local/bin/examples/handshake_server
     ;;
   mint_vectors)
     mkdir -p /out
-    exec /usr/local/bin/mint_vectors
+    exec /usr/local/bin/examples/mint_vectors
     ;;
   aaip_scenario)
-    exec /usr/local/bin/aaip_scenario
+    exec /usr/local/bin/examples/aaip_scenario
     ;;
   bench)
     # Run the bench binary if it exists; otherwise print hint.

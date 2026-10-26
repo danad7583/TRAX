@@ -1,4 +1,5 @@
-//! Key rotation & compromise handling per §6.1
+//! Legacy wire containers. Operational current-key rotation validation and
+//! fork creation are implemented by `crate::graph::PendingSegment::rotate`.
 #[derive(Debug, Clone)]
 pub struct RotationProof<'a> {
     pub new_pubkey: &'a [u8],

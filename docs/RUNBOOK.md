@@ -1,410 +1,156 @@
-# TRAX RUNBOOK
+# TRAX development runbook
 
-This runbook provides operational steps for building, testing, benchmarking, and preparing the TRAX repository for public GitHub publication.
+This runbook covers local builds, tests, benchmarks, and packaging. It does not define a host protocol or deploy a service. See [README](../README.md) for library boundaries and [DAG contract](DAG.md) for shared history and checkpoint behavior.
 
-TRAX stands for **Trust Resolution and Agent eXchange**.
+Genesis binds shared K/signing/hash algorithms, all DAG events count, and records stay provisional until a complete checkpoint. Either participant may seal an ordinary mixed-author segment. Rotation, configuration and closure additionally require a detached peer prefix acknowledgment followed by the initiator's final checkpoint. Durable journal replay re-verifies the recorded history.
 
-## 1. Purpose
+## Toolchain
 
-This runbook is intended for maintainers preparing or validating a TRAX local development environment.
+Use Rust 1.89 or newer:
 
-It covers:
-
-* Environment checks
-* Windows and Linux dependency notes
-* Build validation
-* Test validation
-* Benchmark validation
-* Terminology checks
-* Git hygiene before pushing to a remote repository
-
-## 2. Environment Layout
-
-Expected project root:
-
-```text
-TRAX/
-├── Cargo.toml
-├── README.md
-├── RUNBOOK.md
-├── src/
-├── tests/
-├── benches/
-├── examples/
-├── docker/
-├── vectors/
-└── docs/
-```
-
-The Rust package name should be:
-
-```toml
-name = "trax"
-```
-
-## 3. Dependency Checks
-
-### Rust
-
-Check Rust and Cargo:
-
-```bash
-cargo --version
+~~~sh
 rustc --version
-```
+cargo --version
+~~~
 
-### Windows
+On Windows, install Visual Studio Build Tools with Desktop development with C++ and the Windows SDK. Restart the terminal after installation. The MSVC linker must be available:
 
-On Windows, confirm the MSVC linker is available:
-
-```powershell
+~~~powershell
 where.exe link
-```
+~~~
 
-If `link.exe` is not found, install Visual Studio Build Tools with the C++ workload, then restart the terminal or VS Code.
+On Linux, install the distribution's C/C++ compiler/linker and development headers. These commands should resolve:
 
-To inspect Visual Studio Build Tools from PowerShell:
-
-```powershell
-& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products * -requires Microsoft.VisualStudio.Workload.VCTools -property installationPath
-```
-
-If this prints nothing, the C++ workload is not installed.
-
-### Linux
-
-On Linux, confirm native build tools are available:
-
-```bash
+~~~sh
 cc --version
 make --version
-```
+~~~
 
-Install the equivalent of build essentials for the target distribution if these are missing.
+The checked-in Docker builders use Rust 1.89 with Debian Bookworm, matching the runtime distribution. Their containers run demonstration executables; they are not agent hosts.
 
-## 4. Clean Build
+## Build and Rust checks
 
-From the project root:
+From the TRAX repository root:
 
-```bash
-cargo build --release
-```
+~~~sh
+cargo build --locked --release
+cargo test --locked
+cargo check --locked --all-targets
+cargo fmt --check
+~~~
 
-Expected result:
+Default Cargo tests do not run Python tests. Record the actual current results; do not use an old three-test transcript as a release gate.
 
-```text
-Finished `release` profile [optimized]
-```
+Shared-DAG applications authenticate a shared `ProtocolConfig` at genesis. `with_default_k(signing_algorithm, hash_algorithm)` constructs K=8; `new(k, signing_algorithm, hash_algorithm)` permits an override. Shared K must exceed 4 (minimum 5) and fit u32. Signing/hash algorithms remain explicit, and serialized genesis still requires K and both algorithm fields. SHA-512/256 is always available at runtime; BLAKE3 requires its build feature. Unsupported selections must fail rather than fall back. All DAG events, including forks, rotations, configuration actions, control records and padding, count toward shared K; only a full checkpoint commits.
 
-If the build fails on Windows with:
+For rotation, `rotate(author, parent, branch, &old_key, &new_key)` starts a fresh segment on a new fork, with old-key authorization and new-key possession proof. The peer uses `acknowledge_and_pad(peer, &peer_key)` to add filler through K−2 and sign an `Acknowledge` prefix ending at K−1. The initiator replays it, calls `accept_ack(&proof)`, and supplies `finish_close()` or a real request in the final slot. The initiator's current key signs the final full checkpoint; after rotation it must use the replacement key. A peer or retired old key cannot finalize that exchange. Prefix evidence is embedded in the full proof and retained by `acknowledgment_for(proposal)`; full checkpoint lookup uses `checkpoint_for(participant, node_hash)`. Prefix verification alone never commits partial history.
 
-```text
-error: linker `link.exe` not found
-```
+Configuration is a current-key-authorized fork proposal at the first event of a fresh segment. Its new K/hash apply to the proposal and exchange immediately, and the accepted current configuration changes only after both peer ACK and final checkpoint verify. Old K=8 to new K=5 therefore has a four-event prefix and final event five. Ordinary requests and full ordinary segments receive no automatic padding. `request_close(author, branch)` explicitly opens a close exchange only with at least three slots available; only its peer ACK step adds filler. A final real request can continue instead of closing. Recorded mutual closure cannot force a physical peer to remain connected.
 
-the Windows C++ toolchain is missing or not loaded into the terminal environment.
+Legacy same-author session helpers still use explicit `SegmentConfig::new(k)`. Positive values up to u32::MAX, including K=1 and odd values, are supported; shared ProtocolConfig's minimum K=5 does not apply to them. Their K1/3/4/5/8/14, incomplete-window, cross-K and arithmetic tests are distinct from shared-graph tests. Run `cargo test --test profile` for runtime configuration/hash checks and `cargo test --test handshake` for the bilateral exchange checks.
 
-## 5. Test Run
+The alternative hash profile can be compiled explicitly:
 
-Run:
+~~~sh
+cargo check --locked --no-default-features --features crypto-ed25519,hash-sha2,serde
+~~~
 
-```bash
-cargo test
-```
+The command above removes BLAKE3 availability and selects the legacy SHA-512/256 helper profile. Shared-DAG runtime selection remains explicit in ProtocolConfig. New graph records/proofs remain portable across builds supporting the selected runtime algorithms and are verified against their recorded configuration, not whichever legacy hash32 algorithm is locally enabled. Legacy compile-time hash outputs are not interchangeable. The feature name `no_std` is not a working no-std guarantee.
 
-Expected successful test output includes:
+## Encoding compatibility
 
-```text
-running 3 tests
-test req_4_1_2_session_id_binding ... ok
-test req_5_1_1_segment_proof_validates ... ok
-test req_3_1_1_deterministic_cbor ... ok
+Version 0.2 replaces prototype map declaration/insertion order with strict length-first deterministic CBOR. Map keys sort recursively by encoded length and then bytes; duplicate keys, noncanonical representations, and trailing data are rejected.
 
-test result: ok. 3 passed; 0 failed
-```
+Prototype V1 bytes, node IDs, hashes, proofs, and signatures must not be reused under the new profile. There is no automatic migration. Validate the fixed-byte CBOR conformance test and the broader `tests/encoding.rs` checks when changing encoding.
 
-Some targets may show:
+The durable journal uses version 3 for the exchange-proof format. Earlier journal formats are not automatically migrated; preserve their version boundary when reviewing storage changes.
 
-```text
-running 0 tests
-```
+## Python extension workflow
 
-This is normal for compile-only targets or placeholder test modules.
+Use a Python virtual environment and activate it before installing build tools.
 
-## 6. Benchmark Run
+~~~sh
+python -m venv .venv
+~~~
 
-Run:
+PowerShell activation:
 
-```bash
+~~~powershell
+.venv\Scripts\Activate.ps1
+~~~
+
+Linux activation:
+
+~~~sh
+source .venv/bin/activate
+~~~
+
+Then build and test:
+
+~~~sh
+python -m pip install maturin pytest
+maturin develop --release --features python
+python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py
+~~~
+
+For wheel packaging instead of a development install:
+
+~~~sh
+maturin build --release --features python --out dist
+~~~
+
+Install the resulting wheel before running pytest against that build. The CI wheel job builds, installs, and tests both Python test files. Python bindings expose Rust-backed crypto, Packet0, and same-author window helpers; Python tests are not a Python transport implementation inside the Rust library.
+
+## Benchmark interpretation
+
+~~~sh
 cargo bench --bench dag_benches
-```
+~~~
 
-The benchmark validates:
+Benchmark fixtures explicitly select K=8. The legacy session-window group measures ordered event Merkle-root computation, complete segment-seal creation, and intrinsic signed-proof verification. The ordinary shared-DAG group uses runtime SHA-512/256 and measures segment preparation, staging and sealing, and full admission at 0 and 1,024 previously committed events. The admission benchmark clones the mutable fixture before timing and drops it after timing so history setup and teardown do not dominate the measured operation. These benchmarks do not measure a bilateral rotation/closure exchange, complete host exchange, remote model inference, or disk-journal replay.
 
-* K-window segment proof verification
-* Individual Ed25519 signing
-* K=8 Merkle batch signing
+Do not carry forward the old XOR cumulative-hash timings or the bare-root signing speedup as current authenticated admission performance. `src/bin/test_perf.rs` compares direct signatures with a bare Merkle-root signature; that raw signature is not a session-bound segment seal.
 
-Current known-good benchmark snapshot from a Windows MSVC build:
+When reporting a measurement, include revision, selected K/hash profile, hardware, build mode, actual operation, and repeated-run results. No fixed latency or throughput is promised. Criterion plotting-tool warnings do not change which operation was measured.
 
-```text
-verify_last_8_nodes                  ~1.55 µs
-verify_last_16_nodes                 ~3.15 µs
-verify_last_32_nodes                 ~6.15 µs
-verify_last_64_nodes                 ~12.29 µs
-verify_last_128_nodes                ~24.69 µs
-verify_last_256_nodes                ~49.33 µs
+## Demonstration programs and containers
 
-sign_8_nodes_individual_ed25519      ~183.9 µs
-sign_16_nodes_individual_ed25519     ~368.0 µs
-sign_32_nodes_individual_ed25519     ~748.9 µs
-sign_64_nodes_individual_ed25519     ~1.48 ms
-sign_128_nodes_individual_ed25519    ~2.96 ms
-sign_256_nodes_individual_ed25519    ~5.90 ms
+~~~sh
+cargo run --example handshake_client
+cargo run --example handshake_server
+cargo run --example aaip_scenario
+cargo run --example mint_vectors
+~~~
 
-sign_batch_k8_merkle_root_ed25519    ~26.8 µs
-```
+The handshake examples derive and print a session ID from demonstration inputs; they do not connect over TCP/UDP or implement an on-wire handshake. `tests/test_tcp_packet0_local.py` is a local loopback Packet0 test fixture, not a production TCP service. Scenario/vector examples do not establish complete wire or COSE conformance.
 
-Expected interpretation:
+Optional local Docker demonstration, from the repository root:
 
-```text
-K=8 verification path:       ~1.55 µs per 8-node segment
-K=8 batch signing path:      ~26.8 µs per 8-node signed batch
-8 individual signatures:     ~183.9 µs
-```
+~~~sh
+docker build -t trax-demo -f Dockerfile .
+docker run --rm trax-demo
+~~~
 
-K=8 Merkle batch signing reduces signing cost by approximately **6.8x** compared to signing all 8 nodes individually.
+The multi-mode demonstration image builds the example binaries:
 
-If this appears:
+~~~sh
+docker build -t trax-core:dev -f docker/Dockerfile .
+docker run --rm -e MODE=aaip_scenario trax-core:dev
+docker run --rm -e MODE=handshake_client trax-core:dev
+docker run --rm -e MODE=handshake_server trax-core:dev
+~~~
 
-```text
-Gnuplot not found, using plotters backend
-```
+These commands run local demonstrations; they do not deploy a TRAX endpoint. The normal image build does not include Criterion benchmark executables; run benchmarks with Cargo in the development environment.
 
-it is not a failure. Criterion is using its fallback plotting backend.
+## Review before publishing
 
-## 7. Optional Clean Rebuild
+~~~sh
+git status --short
+git diff --check
+~~~
 
-Use only when a full rebuild is desired:
+Review changed source and tests, current Python packaging metadata, [MIT license](../LICENSE), and documentation together. Generated build outputs and vector-generation outputs should remain outside source control. Historical vector filenames are not evidence that their contents conform.
 
-```bash
-cargo clean
-cargo build --release
-cargo test
-cargo bench --bench dag_benches
-```
+The library does not provide a model API, HTTP server, automatic network key exchange, encryption stack, malicious-peer classification, or network alerts. Legacy replay/quarantine helpers have the limits described in the README. Keep a clear distinction between same-author admission helpers, shared paired-history semantics, and application behavior.
 
-`cargo clean` removes local build output under `target/`. It does not alter source files.
-
-## 8. Terminology Validation
-
-The project was rebranded from AAICP Core to TRAX.
-
-Before publishing, check for stale terminology:
-
-### PowerShell
-
-```powershell
-Get-ChildItem -Recurse -File | Select-String -Pattern "AAICP|aaicp|Aaicp"
-```
-
-### Bash
-
-```bash
-grep -RInE "AAICP|aaicp|Aaicp" .
-```
-
-Expected result:
-
-```text
-No stale AAICP naming in public-facing TRAX files.
-```
-
-AAIP references may remain if they intentionally refer to the lower signed-message / packet exchange layer.
-
-Known intentional AAIP naming:
-
-```text
-examples/aaip_scenario.rs
-MODE=aaip_scenario
-aaip_scenario documentation
-```
-
-Do not rename these unless the scenario is changed to demonstrate full TRAX trust-resolution behavior rather than the lower signed-message exchange.
-
-## 9. Git Ignore Validation
-
-TRAX should ignore generated build and benchmark artifacts.
-
-Recommended `.gitignore` entries:
-
-```gitignore
-/target/
-/criterion/
-/vectors/generated/
-.env
-.env.*
-!.env.example
-*.log
-.DS_Store
-Thumbs.db
-.vscode/
-!.vscode/settings.json
-!.vscode/extensions.json
-*.pdb
-*.ilk
-*.exe
-*.dll
-*.lib
-*.exp
-*.tmp
-*.bak
-*.swp
-```
-
-Check ignored files:
-
-```bash
-git status --ignored
-```
-
-If `target/` was accidentally staged before `.gitignore` was added, remove it from Git tracking without deleting local files:
-
-```bash
-git rm -r --cached target
-```
-
-Then recheck:
-
-```bash
-git status --ignored
-```
-
-## 10. Pre-Push Validation
-
-Before pushing to GitHub, run:
-
-```bash
-cargo build --release
-cargo test
-cargo bench --bench dag_benches
-git status --ignored
-```
-
-Optional terminology scan:
-
-```bash
-grep -RInE "AAICP|aaicp|Aaicp" .
-```
-
-On Windows PowerShell:
-
-```powershell
-Get-ChildItem -Recurse -File | Select-String -Pattern "AAICP|aaicp|Aaicp"
-```
-
-## 11. Commit Preparation
-
-Review staged files:
-
-```bash
-git status
-```
-
-Stage updates:
-
-```bash
-git add .
-```
-
-If build artifacts appear staged, remove them from Git tracking:
-
-```bash
-git rm -r --cached target
-git rm -r --cached criterion
-```
-
-Commit:
-
-```bash
-git commit -m "Prepare TRAX public repository release"
-```
-
-## 12. Remote Setup
-
-If the remote has not been added yet:
-
-```bash
-git remote add origin https://github.com/YOUR_USERNAME/trax.git
-```
-
-If the remote URL is wrong:
-
-```bash
-git remote set-url origin https://github.com/YOUR_USERNAME/trax.git
-```
-
-Verify:
-
-```bash
-git remote -v
-```
-
-Push:
-
-```bash
-git push -u origin main
-```
-
-If GitHub reports:
-
-```text
-Repository not found.
-```
-
-verify that:
-
-* The GitHub repository exists
-* The username is correct
-* The repository name is correct
-* The authenticated GitHub account has access
-* The remote URL is correct
-
-## 13. Known Good State
-
-A known-good local state from the Windows MSVC environment produced:
-
-```text
-cargo build --release  ✅ passed
-cargo test             ✅ passed
-cargo bench            ✅ passed
-```
-
-Validated conformance tests:
-
-```text
-req_3_1_1_deterministic_cbor      ✅ passed
-req_4_1_2_session_id_binding      ✅ passed
-req_5_1_1_segment_proof_validates ✅ passed
-```
-
-Validated K=8 performance:
-
-```text
-8-node segment verification       ~1.55 µs
-K=8 Merkle batch signing          ~26.8 µs
-8 individual Ed25519 signatures   ~183.9 µs
-```
-
-## 14. Release Notes Reminder
-
-Before publishing publicly, confirm:
-
-* License has been selected
-* README is accurate
-* RUNBOOK is accurate
-* No secrets or local environment files are committed
-* `target/` is ignored
-* Generated vectors are intentionally included or ignored
-* AAIP references are intentional
-* TRAX terminology is consistent
+Publishing, remote changes, or deployment are separate actions; the commands above do not authorize them.

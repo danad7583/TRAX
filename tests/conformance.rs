@@ -1,11 +1,25 @@
 // Conformance tests mapped to requirement IDs.
-mod vectors;
-use vectors::load_vector;
+use trax::config::SegmentConfig;
 
 #[test]
 fn req_3_1_1_deterministic_cbor() {
-    let v = load_vector("deterministic_cbor_valid.cbor");
-    assert!(!v.is_empty());
+    use std::collections::BTreeMap;
+    use trax::encoding::{decode, encode_deterministic};
+
+    // BTreeMap iterates a, aa, z. The wire profile orders encoded keys by
+    // length first, then bytes: a, z, aa. Expected CBOR is fixed independently
+    // of the serializer's output and any historical placeholder fixture.
+    let value = BTreeMap::from([
+        ("aa".to_owned(), 2_u64),
+        ("z".to_owned(), 1_u64),
+        ("a".to_owned(), 3_u64),
+    ]);
+    let expected = [
+        0xa3, 0x61, b'a', 0x03, 0x61, b'z', 0x01, 0x62, b'a', b'a', 0x02,
+    ];
+    assert_eq!(encode_deterministic(&value).unwrap(), expected);
+    let decoded: BTreeMap<String, u64> = decode(&expected).unwrap();
+    assert_eq!(decoded, value);
 }
 
 #[test]
@@ -13,7 +27,7 @@ fn req_5_1_1_segment_proof_is_intrinsically_valid_and_context_admitted() {
     use ed25519_dalek::SigningKey;
     use trax::crypto::hash32;
     use trax::dag::{
-        create_segment_seal_k8, event_tip, lineage_key_id, receiver_id,
+        create_segment_seal, event_tip, lineage_key_id, receiver_id,
         verify_segment_proof_for_context, verify_segment_proof_intrinsic, TrustedSessionContext,
     };
     use trax::{PostGenesisEventV1, SegmentProof};
@@ -38,10 +52,12 @@ fn req_5_1_1_segment_proof_is_intrinsically_valid_and_context_admitted() {
             event
         })
         .collect::<Vec<_>>();
-    let seal = create_segment_seal_k8(&key, &events).unwrap();
+    let seal = create_segment_seal(SegmentConfig::new(8).unwrap(), &key, &events).unwrap();
     let proof = SegmentProof { events, seal };
-    verify_segment_proof_intrinsic(&proof, &key.verifying_key()).unwrap();
+    verify_segment_proof_intrinsic(SegmentConfig::new(8).unwrap(), &proof, &key.verifying_key())
+        .unwrap();
     let trusted = TrustedSessionContext::from_verified_state(
+        SegmentConfig::new(8).unwrap(),
         hash32(b"session"),
         receiver_id(&receiver.verifying_key()),
         key.verifying_key(),

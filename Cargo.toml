@@ -1,9 +1,10 @@
 [package]
 name = "trax"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.89"
 license = "MIT"
-description = "TRAX v1.1.0 core library: canonical encoding, handshake/session, DAG trust chain, rotation/quarantine, rate limiting."
+description = "Immutable fork-only DAG operations, configurable signed checkpoints, key lineage verification, and durable history."
 repository = "https://github.com/danad7583/TRAX"
 keywords = ["trax", "aaip", "agents", "security", "dag"]
 

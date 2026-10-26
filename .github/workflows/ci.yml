@@ -21,4 +21,4 @@ jobs:
           python -m pip install maturin pytest
           maturin build --release --features python --out dist
           python -m pip install dist/*.whl
-          python -m pytest tests/test_python_bindings.py
+          python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py

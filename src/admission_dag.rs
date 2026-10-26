@@ -1,6 +1,7 @@
 //! Local in-memory DAG admission path for verified Packet 0 envelopes.
 
 use crate::admission::{decode_admission_envelope_v1, verify_admission_envelope_v1_for_receiver};
+use crate::config::SegmentConfig;
 use crate::crypto::hash32;
 use crate::dag::{receiver_id, TrustedSessionContext};
 use crate::encoding::encode_deterministic;
@@ -31,15 +32,24 @@ pub struct AdmittedPacket0Node {
     pub dag_node: DagNode,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LocalAdmissionDag {
+    config: SegmentConfig,
     nodes: Vec<AdmittedPacket0Node>,
     tip_hash: [u8; 32],
 }
 
 impl LocalAdmissionDag {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(config: SegmentConfig) -> Self {
+        Self {
+            config,
+            nodes: Vec::new(),
+            tip_hash: [0; 32],
+        }
+    }
+
+    pub fn config(&self) -> SegmentConfig {
+        self.config
     }
 
     pub fn is_empty(&self) -> bool {
@@ -84,6 +94,7 @@ impl LocalAdmissionDag {
         let receiver_key =
             VerifyingKey::from_bytes(&receiver_key_bytes).map_err(|_| TraxError::Crypto)?;
         Ok(TrustedSessionContext::from_verified_state(
+            self.config,
             session_id,
             receiver_id(&receiver_key),
             lineage_key,
@@ -119,14 +130,16 @@ impl LocalAdmissionDag {
 
         let event_bytes = encode_deterministic(&event)?;
         let node_id = hash32(&event_bytes);
+        let index = u64::try_from(self.nodes.len()).map_err(|_| TraxError::ArithmeticOverflow)?;
+        index.checked_add(1).ok_or(TraxError::ArithmeticOverflow)?;
         let dag_node = DagNode {
             prev_tip_hash: self.tip_hash,
             segment_anchor: node_id,
-            index: self.nodes.len() as u64,
+            index,
             ts: 0,
             op_type: PACKET0_ADMISSION_OP,
             peer_id: peer_id_from_public_key(&event.sender_public_key),
-            counter: self.nodes.len() as u64,
+            counter: index,
             signature: envelope.signature,
         };
 
@@ -201,7 +214,7 @@ mod tests {
     #[test]
     fn valid_packet0_appends_one_dag_admission_node() {
         let f = fixture();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         assert!(dag.is_empty());
         let node_id = dag
@@ -224,8 +237,8 @@ mod tests {
     #[test]
     fn returned_admission_hash_is_stable_for_same_packet0_input() {
         let f = fixture();
-        let mut left = LocalAdmissionDag::new();
-        let mut right = LocalAdmissionDag::new();
+        let mut left = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
+        let mut right = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         let left_id = left
             .admit_packet0(
@@ -248,7 +261,7 @@ mod tests {
     #[test]
     fn tampered_payload_rejects_without_append() {
         let f = fixture();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         assert!(dag
             .admit_packet0(
@@ -263,7 +276,7 @@ mod tests {
     #[test]
     fn wrong_receiver_rejects_without_append() {
         let f = fixture();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         assert!(dag
             .admit_packet0(
@@ -281,7 +294,7 @@ mod tests {
         let mut decoded = decode_admission_envelope_v1(&f.envelope).unwrap();
         decoded.sender_public_key = vec![0u8; HASH_LEN - 1];
         let malformed = encode_deterministic(&decoded).unwrap();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         assert!(dag
             .admit_packet0(
@@ -296,7 +309,7 @@ mod tests {
     #[test]
     fn packet0_parent_refs_are_preserved_in_admitted_event() {
         let f = fixture();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
 
         dag.admit_packet0(
             &f.envelope,
@@ -311,7 +324,7 @@ mod tests {
     #[test]
     fn verified_packet0_derives_trusted_post_genesis_context() {
         let f = fixture();
-        let mut dag = LocalAdmissionDag::new();
+        let mut dag = LocalAdmissionDag::new(SegmentConfig::new(8).unwrap());
         let node_id = dag
             .admit_packet0(
                 &f.envelope,
@@ -320,6 +333,7 @@ mod tests {
             )
             .unwrap();
         let context = dag.trusted_context_from_latest_packet0().unwrap();
+        assert_eq!(context.config(), dag.config());
         assert_eq!(context.committed_tip(), node_id);
         assert_eq!(context.lineage_key(), &f.sender.verifying_key());
         assert_eq!(

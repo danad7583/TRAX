@@ -1,537 +1,202 @@
 # TRAX
 
-**TRAX** stands for **Trust Resolution and Agent eXchange**.
+**Trust Resolution and Agent eXchange** is a Rust library for deterministic DAG records, insertion/verification, shared negotiated configuration, checkpoint attestations, key authority, and durable history. Applications own networking, peer connections, models, and decisions about verification results.
 
-TRAX is a Rust-based cryptographic trust layer for verifiable agent-to-agent communication. It provides a transport-independent mechanism for agents to authenticate messages, validate interaction history, and resolve trust through signed Directed Acyclic Graphs rather than centralized authority.
+## Version 0.2 compatibility
 
-TRAX is designed around a simple principle:
+This is a breaking change from the 0.1 prototype. Deterministic CBOR now recursively sorts map keys by encoded length and then encoded bytes, rejects duplicate keys, and accepts exactly one canonical item. It replaces the prototype's declaration/insertion-order encoding.
 
-```text
-Identity is not trust.
-Trust is resolved from verifiable history.
-```
+**Existing prototype V1 bytes, node IDs, hashes, signatures, and proofs must not be carried into this profile. There is no automatic migration.** Retaining a V1 type name does not preserve the old signing transcript.
 
-The protocol focuses on objective trust verification. It does not attempt to determine whether an agent is intelligent, truthful, ethical, or semantically correct. Instead, TRAX verifies whether the agent’s communication history, signatures, counters, key transitions, and DAG lineage are cryptographically valid.
+Shared-DAG genesis explicitly binds K, signing algorithm, and runtime hash algorithm in `ProtocolConfig`. `with_default_k(signing_algorithm, hash_algorithm)` selects K=8; algorithms still require explicit selection, and all serialized configuration fields remain mandatory. New graph records and proofs are portable across builds that support their selected algorithms, regardless of the legacy `hash32` default feature. They must be verified under their recorded historical configuration. Legacy `hash32`/session helpers still use a compile-time hash profile, whose output is not interchangeable between BLAKE3 and SHA-512/256. The durable journal uses version 3 for the exchange-proof format; earlier journal formats are not automatically migrated.
 
-## Project Status
+## Library layers
 
-Current validated local status:
+- **Shared paired history:** `PairDag` represents a common mirrored relationship DAG with immutable records, explicit forks, recorded key authority, independent checkpoint attestations, and a durable replay-verified journal. See [DAG and storage contract](docs/DAG.md).
+- **Same-author session windows:** `dag::TrustedSessionContext` and `ReceiveAdmissionWindow` verify ordered batches for one lineage key, one receiver, and one session. Directional windows are distinct from the shared paired-DAG model.
+- **Packet0 admission:** signed receiver-bound initial envelopes and process-local `LocalAdmissionDag` records. This helper is not persistent storage, a peer registry, or distributed synchronization.
+- **Encoding and crypto:** strict deterministic CBOR, Ed25519 signatures, hashing, HKDF session-ID derivation, and ordered Merkle roots/proofs.
+- **Optional Python bindings:** Rust-backed crypto, Packet0, and same-author session-window APIs.
 
-```text
-cargo build --release  ✅ passed
-cargo test             ✅ passed
-cargo bench            ✅ passed
-```
+TRAX does not open HTTP/transport sockets, perform an on-wire key exchange, invoke models/tools, interpret agent decisions, determine malicious intent, or send alerts. It returns validated records or errors for the application to handle.
 
-Validated conformance tests:
+## Shared paired-DAG contract
 
-```text
-req_3_1_1_deterministic_cbor      ✅ passed
-req_4_1_2_session_id_binding      ✅ passed
-req_5_1_1_segment_proof_validates ✅ passed
-```
+The host agrees on and authenticates one shared configuration at genesis. `ProtocolConfig::with_default_k(signing_algorithm, hash_algorithm)` selects K=8; `ProtocolConfig::new(k, signing_algorithm, hash_algorithm)` overrides the cadence. These constructors validate the supplied agreement; they do not perform network negotiation. K, signing algorithm, and hash algorithm are always serialized and required during deserialization:
 
-## Features
+~~~rust
+use trax::config::{HashAlgorithm, ProtocolConfig, SigningAlgorithm};
 
-* Canonical CBOR encoding
-* COSE Sign1-oriented message structure
-* Handshake/session binding
-* DAG nodes and K-window segment proofs
-* Key rotation and quarantine support
-* Replay protection using monotonic counters with windowing
-* Token-bucket rate limiting
-* Ed25519 signing support
-* K=8 Merkle batch signing
-* Transport-independent trust validation
-* Signed DAG-based trust history
-* Challenge-response validation
-* Trust resolution separated from inference behavior
+let config = ProtocolConfig::with_default_k(
+    SigningAlgorithm::Ed25519,
+    HashAlgorithm::Sha512256,
+)?;
+assert_eq!(config.k(), 8);
 
-## Architecture Summary
+let smaller = ProtocolConfig::new(
+    5,
+    SigningAlgorithm::Ed25519,
+    HashAlgorithm::Sha512256,
+)?;
+~~~
 
-TRAX separates identity from trust.
+Shared `ProtocolConfig` requires K greater than 4 (minimum 5), fitting u32. Ed25519 is the only supported signing algorithm; other algorithm identifiers are rejected. Runtime hashing supports SHA-512/256 and, when compiled with `hash-blake3`, BLAKE3. Selecting an unavailable algorithm returns `UnsupportedAlgorithm`; there is no fallback. Enabling an algorithm makes it available, not automatically selected.
 
-An agent identity may be represented by a public/private key pair, but identity alone does not establish trust. Trust is resolved by validating signed message history, DAG continuity, replay protection, key continuity, and challenge-response behavior.
+All DAG events across all branches count toward the shared K, including ordinary records, forks, rotations, configuration actions, control records, and padding. Events remain provisional until a complete K-event checkpoint verifies and commits. For an ordinary mixed-author segment, either participant may supply its single checkpoint signature. This attests that participant's DAG view, not separate signatures from every named author or authentication of a network address.
 
-TRAX supports an AAIP lower layer for signed agent packet/message exchange. AAIP naming is intentionally retained where examples or modes refer specifically to the lower signed-message scenario rather than the full TRAX trust-resolution layer.
+Rotation, configuration changes, and closure use a bilateral exchange. `rotate(author, parent, branch, &old_key, &new_key)` must be the first event of a fresh segment on a new fork branch. It requires both current old-key authorization and proof of possession of the replacement key. The peer calls `acknowledge_and_pad(peer, &peer_key)`, adding padding through position K−2 and an `Acknowledge` event at K−1, then signing a detached proof of that exact prefix. The initiator replays the prefix and calls `accept_ack(&proof)`, then either `finish_close()` for a final `CloseConfirm` at K or appends a real request in that slot to continue. The initiator supplies the full checkpoint using its current key; after rotation, only its replacement key may seal it. The unchanged peer and retired initiator key cannot supply that final checkpoint.
 
-For example:
+The K−1 prefix acknowledgment is a distinct proof, not an ordinary full-K checkpoint or partial admission. It is embedded in `GraphSegmentProof.acknowledgment` and bound into the final checkpoint and confirmation. `acknowledgment_for(proposal)` retrieves the peer's recorded prefix evidence. Nothing becomes committed until the acknowledgment and final checkpoint both verify.
 
-```text
-aaip_scenario = lower signed-message / packet exchange demonstration
-trax          = trust-resolution layer built around DAG history and cryptographic continuity
-```
+`configure` is also a current-key-authorized fork action at the start of a fresh segment. Its new K and hash profile apply from the proposal itself: changing K=8 to K=5 produces a four-event prefix and final event at five. The accepted DAG configuration changes only after the full exchange verifies and commits, then applies globally to later live insertions, including continuations of older branches. A committed rotation changes only the affected participant's authority. Earlier records and attestations retain their historical authority/profile.
 
-### Receive admission invariant
+Ordinary requests and completed ordinary segments receive no automatic padding or close proposal. `request_close(author, branch)` explicitly starts a close exchange when at least three slots remain; only its peer acknowledgment step adds the necessary filler. A close exchange can instead end with a real request. The recorded mutual close proof cannot force a physical peer to remain connected.
 
-Receipt is not admission. Packet 0/genesis is individually authenticated and establishes the
-initial trusted session, receiver, lineage key, and DAG root. Every normal post-genesis event
-MUST enter a provisional K-window first; structural validation alone MUST NOT advance trusted
-history or release the event as admitted communication.
+Detached checkpoint lookup via `checkpoint_for(participant, node_hash)` can return a historical attestation after later nodes have been appended. Adding another participant's independent attestation does not rewrite the referenced history.
 
-K=8 is the normative signed-batch profile. Events 1 through 7 remain provisional. The eighth
-event carries or is associated with `SegmentSealV1`, which signs a deterministic,
-domain-separated `SegmentCommitmentV1`. That commitment binds the session, receiver, trusted
-lineage key identity, segment index, contiguous counters, starting committed tip, final
-provisional tip, and the order-sensitive Merkle root of all eight events. K=8 signing is one
-segment signature, not eight per-packet signatures; the final Kth event seals the window rather
-than introducing a ninth event.
+## Legacy same-author session helpers
 
-A receiver SHALL verify the entire ordered window and its seal against the lineage public key
-already trusted through genesis or validated rotation. Only then SHALL it atomically admit all
-eight events and advance the committed tip. Reordering or changing an event, changing context,
-breaking tip/counter continuity, or failing signature verification rejects the whole window.
-Failure commits zero provisional events and leaves the committed DAG state unchanged. Partial
-windows MUST remain provisional and MUST NOT be promoted implicitly at end of session.
+These are separate lower-level APIs, not the shared graph's admission or exchange policy. They use explicit `SegmentConfig::new(k)` and the legacy compile-time hash profile. Their K must be positive and fit u32; the shared graph's minimum K=5 does not apply to these helpers:
 
-`receiver_id` has one normative meaning in this profile:
-`H("TRAX:RECEIVER-ID:V1\\0" || receiver_lineage_public_key)`. It identifies the stable receiving
-trust identity and MUST NOT be derived from an ephemeral transport or future transmission key.
 
-### K=8 Rust admission API
 
-`PostGenesisEventV1` commits to session, lineage and receiver identities, segment/counter
-position, previous tip, content hash, and payload hash. `SegmentCommitmentV1` binds the ordered
-K=8 Merkle root to that context; `SegmentSealV1` authenticates the commitment; `SegmentProof`
-packages the ordered events and seal.
+| API | Purpose |
+| --- | --- |
+| `LocalAdmissionDag::new(config)` | Carry the selected K into a Packet0-derived context |
+| `TrustedSessionContext::from_verified_state(config, ...)` | Restore state the caller has already independently verified |
+| `ReceiveAdmissionWindow::new(context)` | Create a window, checking restored count arithmetic |
+| `create_segment_seal(config, key, events)` | Sign exactly K ordered same-author events |
+| `verify_segment_proof_intrinsic(config, proof, key)` | Check internal validity; this is not current-session admission |
+| `verify_segment_proof_for_context(proof, context)` | Additionally verify the authoritative session context |
+| `ordered_merkle_root(config, events)` | Commit to exactly K ordered event encodings |
 
-`TrustedSessionContext` privately owns the authoritative session ID, receiver ID, lineage
-verification key, committed tip, segment index, and next counter. A verified `LocalAdmissionDag`
-produces it with `trusted_context_from_latest_packet0()`. Applications restoring independently
-verified state may use the explicitly named `from_verified_state` constructor.
+Use a Packet0-derived context when available. `from_verified_state` is a restoration boundary, not a way to declare unverified fields trusted.
 
-`verify_segment_proof_intrinsic()` checks internal order, continuity, Merkle commitment, and
-signature. It does **not** establish that the segment belongs to the receiver's current session.
-`verify_segment_proof_for_context()` additionally matches admission fields against
-`TrustedSessionContext`. Intrinsic cryptographic validity is not session admission.
+~~~rust
+use trax::admission_dag::LocalAdmissionDag;
+use trax::dag::ReceiveAdmissionWindow;
+use trax::{PostGenesisEventV1, SegmentConfig, SegmentSealV1, TraxError};
 
-`ed25519_sign_merkle_root_k8_raw()` is deliberately named as a low-level bare-root primitive.
-Its output is not a `SegmentSealV1` and MUST NOT be used as proof of TRAX admission. The former
-`ed25519_sign_batch_k8()` name remains only as a deprecated compatibility alias.
+fn receive_batch(
+    config: SegmentConfig,
+    packet0: &[u8],
+    packet0_payload: &[u8],
+    receiver_public_key: &[u8],
+    batch: Vec<(PostGenesisEventV1, Vec<u8>)>,
+    seal: &SegmentSealV1,
+) -> Result<Vec<PostGenesisEventV1>, TraxError> {
+    let mut dag = LocalAdmissionDag::new(config);
+    dag.admit_packet0(packet0, packet0_payload, receiver_public_key)?;
+    let context = dag.trusted_context_from_latest_packet0()?;
+    let mut window = ReceiveAdmissionWindow::new(context)?;
+    for (event, payload) in batch {
+        window.stage_with_payload(event, &payload)?;
+    }
+    window.verify_and_commit(seal)
+}
+~~~
 
-`ReceiveAdmissionWindow::stage_with_payload()` hashes actual payload bytes before provisional
-staging. `content_hash` is authenticated by the seal but is not recomputed because this protocol
-version does not yet define which canonical content bytes it represents. After eight valid
-event/payload pairs, `verify_and_commit()` performs context-bound verification and atomically
-returns the admitted events.
+For example, a caller can select `SegmentConfig::new(3)?`. Every event in this session-window API remains provisional until all K events and a valid seal are present. There is no partial commit, implicit end-of-session flush, or automatic padding. Failed verification does not advance committed history. Counter/segment arithmetic is checked before mutation.
 
-The receive window owns active admission state, not permanent DAG history. It retains the trusted
-context, provisional events/tip, and total committed count. Newly committed events are returned
-for external persistence rather than retained indefinitely. The context leaves a clean future
-transition point for authenticated lineage-key rotation; rotation is not implemented here.
+The window hashes actual payload bytes. Its `content_hash` is authenticated by the seal, but these low-level event types do not define the application's canonical content; callers must define and check that binding themselves.
 
-## Dependencies
+## Merkle profile
 
-TRAX is a Rust project and requires the Rust toolchain, including `cargo` and `rustc`.
+The shared graph uses runtime-profile `profile::hash_bytes(algorithm, data)`, `domain_hash(config, domain, bytes)`, and `merkle_root(protocol_config, messages)`. Root computation hashes borrowed payloads and reduces one vector of hashes in place; it does not construct inclusion proofs or clone all payloads.
 
-### Rust Toolchain
+Legacy `crypto::merkle_root(segment_config, messages)`, `root_and_proofs(segment_config, messages)`, and `verify_merkle_inclusion(segment_config, ...)` provide roots and inclusion proofs under the compile-time hash profile. Both full-segment layers use exactly K ordered leaves. Leaf and parent hashes have separate domain prefixes. At each level an unpaired final node is promoted unchanged; no duplicate/artificial leaf is added. Legacy inclusion proofs omit promotion levels and must match the sibling sequence implied by K and the ordered index exactly. Legacy K=1 has a leaf root and an empty proof; shared `ProtocolConfig` still requires K≥5. Detached prefix commitments use K−1 leaves under the negotiated shared profile.
 
-Install Rust using `rustup`, then verify:
+`ed25519_sign_merkle_root_raw(config, key, messages)` signs only a bare root. It does not bind session, receiver, lineage, or counters and **is not an admission seal**. Explicit K8 raw helpers remain conveniences for that tree size, not an implicit admission configuration.
 
-```bash
-cargo --version
-rustc --version
-```
+## Build and validation
 
-### Windows Build Dependencies
+Rust 1.89 or newer and a native linker are required. On Windows, install Visual Studio Build Tools with **Desktop development with C++** and the Windows SDK, then restart the terminal. On Linux, install the distribution's C/C++ build toolchain and development headers.
 
-On Windows, the default Rust MSVC target requires the Microsoft C/C++ build tools. VS Code alone is not enough.
-
-Required:
-
-* Rust toolchain through `rustup`
-* Microsoft Visual Studio Build Tools
-* Desktop development with C++ workload
-* MSVC C++ build tools
-* Windows SDK
-
-If these are missing, builds may fail with:
-
-```text
-error: linker `link.exe` not found
-```
-
-After installing the Windows build tools, restart the terminal or VS Code before running Cargo commands.
-
-### Linux Build Dependencies
-
-On Linux, Rust projects generally require the standard native build toolchain in addition to Rust.
-
-Required:
-
-* Rust toolchain through `rustup`
-* System C compiler/linker
-* Standard build tools such as `gcc`, `make`, and development headers
-
-Debian/Ubuntu-based systems commonly satisfy this with the system build essentials package. Other distributions provide equivalent compiler and linker packages through their package managers.
-
-### Optional Tools
-
-* Docker / Docker Compose for containerized scenarios
-* Git for source control
-* Gnuplot for Criterion benchmark graphs
-
-Gnuplot is optional. If it is not installed, Criterion may report:
-
-```text
-Gnuplot not found, using plotters backend
-```
-
-This does not prevent benchmarks from running.
-
-## Build
-
-```bash
+~~~sh
 cargo build --release
-```
+cargo test
+cargo check --all-targets
+cargo bench --bench dag_benches
+~~~
 
-## Python Bindings
+Benchmarks measure local library operations. The shared-DAG group measures segment preparation, staging and sealing, and full admission at 0 and 1,024 prior events, using K=8 and SHA-512/256. Admission fixture cloning and teardown occur outside the measured operation. This README makes no fixed latency, throughput, or end-to-end networking claim. Historical XOR-based cumulative-hash timings were not authenticated segment verification.
 
-TRAX provides a Python extension module named `trax`. The Python API is a thin
-PyO3/maturin binding over the compiled Rust crate; cryptographic and trust logic
-remain in Rust.
+Default features are `crypto-ed25519`, `hash-blake3`, and `serde`. Shared-DAG configuration still explicitly selects its runtime algorithms. Compile the legacy SHA-512/256 profile without BLAKE3 availability using:
 
-After the package is installed from a built wheel or package distribution,
-applications can import it directly:
+~~~sh
+cargo check --no-default-features --features crypto-ed25519,hash-sha2,serde
+~~~
 
-```python
+The `no_std` feature name does not establish a working no-std build; the library uses standard-library facilities.
+
+## Python bindings
+
+Build the extension in a virtual environment with maturin:
+
+~~~sh
+python -m venv .venv
+python -m pip install maturin pytest
+maturin develop --release --features python
+python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py
+~~~
+
+Activate the environment before pip/maturin: `.venv\Scripts\Activate.ps1` on PowerShell, or `source .venv/bin/activate` on Linux. Alternatively install a wheel built by `maturin build --release --features python`.
+
+Private keys are opaque Rust-backed objects:
+
+~~~python
 import trax
 
-digest = trax.hash32(b"hello")
-```
-
-Session and Ed25519 helpers are also exposed as bytes-based wrappers around the
-Rust implementation:
-
-```python
-import trax
-
-keys = trax.generate_keypair()
-private_key = keys["private_key"]
-public_key = keys["public_key"]
-
-message = b"hello from python"
-signature = trax.sign_message(private_key, message)
-
-assert trax.verify_message(public_key, message, signature) is True
-assert trax.verify_message(public_key, b"tampered", signature) is False
-
-nonce_a = trax.generate_nonce()
-nonce_b = trax.generate_nonce()
-transcript_hash = trax.hash32(b"demo transcript")
-session_id = trax.derive_session_id(transcript_hash, nonce_a, nonce_b)
-
-assert len(session_id) == 32
-```
-
-Packet 0 admission envelopes can be created and verified as canonical CBOR bytes:
-
-```python
 sender = trax.generate_keypair()
 receiver = trax.generate_keypair()
-
-payload = b"packet zero payload"
-session_id = trax.hash32(b"session transcript")
-nonce = trax.generate_nonce()
-
+payload = b"initial application payload"
+session_id = trax.derive_session_id(
+    trax.hash32(b"application-supplied transcript"),
+    trax.generate_nonce(),
+    trax.generate_nonce(),
+)
 envelope = trax.create_admission_envelope_v1(
-    sender["private_key"],
-    receiver["public_key"],
-    session_id,
-    nonce,
-    payload,
-    "packet0.admission",
+    sender["private_key"], receiver["public_key"], session_id,
+    trax.generate_nonce(), payload, "packet0.admission",
 )
-
-assert trax.verify_admission_envelope_v1(envelope, payload) is True
-assert (
-    trax.verify_admission_envelope_v1_for_receiver(
-        envelope,
-        payload,
-        receiver["public_key"],
-    )
-    is True
-)
-
-dag = trax.LocalDag()
+dag = trax.LocalDag(k=3)
 node_id = dag.admit_packet0(envelope, payload, receiver["public_key"])
-trusted = dag.trusted_context_from_latest_packet0()
+context = dag.trusted_context_from_latest_packet0()
+assert context.k() == 3
+window = trax.ReceiveAdmissionWindow(context)
+~~~
 
-assert len(node_id) == 32
-assert len(dag) == 1
-```
+The application supplies the handshake transcript and transport; deriving a session ID does not perform a handshake. Python requires a 32-byte transcript hash and 16-byte nonces.
 
-### Python API
+Explicit-K Python entrypoints include:
 
-`hash32(data: bytes) -> bytes`
+- `create_segment_seal(private_key, events, k)`
+- `verify_segment_seal_intrinsic(public_key, events, seal, k)`
+- `verify_segment_seal_for_context(context, events, seal)`
+- `TrustedSessionContext.from_verified_state(..., k=k)`
 
-Returns the 32-byte TRAX hash for `data`.
+`window.stage(event_bytes, payload)` stages only; `window.verify_and_commit(seal_bytes)` releases the complete admitted batch. Hashing, direct signing/verification, receiver identity, and Packet0 encode/decode/verification helpers remain available. These Python wrappers expose the session-window layer; see [docs/DAG.md](docs/DAG.md) for the paired-DAG/storage API.
 
-`generate_keypair() -> dict`
+## Auxiliary helpers and limits
 
-Generates an Ed25519 keypair in Rust and returns `{"private_key": PrivateKey,
-"public_key": bytes}`. The private key is an opaque Rust-backed Python object;
-the public key is 32 bytes.
+`session::derive_session_id` uses HKDF-SHA512 on supplied context/nonces and optional caller-supplied shared-secret bytes. The `crypto-x25519` dependency feature does not implement an X25519 exchange or encryption stack.
 
-`PrivateKey.public_key() -> bytes`
+`rate::TokenBucket` is a standalone caller-driven limiter, not an integrated admission policy. `replay::LastSeen` leaves in-window duplicate filtering incomplete. Session-window counter continuity and paired-DAG verification are separate checks.
 
-Returns the 32-byte public key corresponding to the opaque private key.
+Legacy `rotation.rs` types do not implement quarantine or a rotation workflow. Paired-DAG recorded rotation is a distinct authority transition described in [docs/DAG.md](docs/DAG.md).
 
-`generate_nonce() -> bytes`
+`encoding::cose_sign1` explicitly returns an unsupported-operation error; it never returns unsigned bytes as successful signing. Use the explicit admission/checkpoint signing APIs. Examples under `examples/` demonstrate helpers, not a complete host or wire protocol.
 
-Returns a 16-byte cryptographically random nonce generated in Rust.
+## Repository guide
 
-`derive_session_id(transcript_hash: bytes, client_nonce: bytes, server_nonce: bytes) -> bytes`
+- `src/config.rs`: validated shared configuration and optional K=8 construction helper
+- `src/exchange.rs`: detached peer acknowledgments of exact K−1 prefixes
+- `src/dag.rs`: same-author session admission and segment seals
+- `src/admission.rs`, `src/admission_dag.rs`: Packet0 helpers
+- [docs/DAG.md](docs/DAG.md): common paired DAG, forks, key authority, and durable journal
+- `src/encoding.rs`, `src/crypto.rs`: deterministic representation and crypto primitives
+- `tests/`: inspect assertions rather than inferring coverage from requirement IDs
+- `benches/`: local-operation benchmarks
+- `vectors/`: some historical files remain placeholders; filenames are not conformance evidence
 
-Derives a 32-byte TRAX session ID in Rust. `transcript_hash` must be 32 bytes;
-`client_nonce` and `server_nonce` must be 16 bytes each.
-
-`sign_message(private_key: PrivateKey, message: bytes) -> bytes`
-
-Signs `message` with an opaque Rust-backed Ed25519 private key and returns a
-64-byte signature. Raw private key bytes are not accepted by this API.
-
-`verify_message(public_key: bytes, message: bytes, signature: bytes) -> bool`
-
-Verifies a 64-byte Ed25519 signature with a 32-byte public key. Returns `True`
-for a valid signature and `False` for a validly shaped signature that does not
-verify.
-
-`create_admission_envelope_v1(private_key: PrivateKey, receiver_public_key: bytes, session_id: bytes, nonce: bytes, payload: bytes, message_type: str, dag_parent_refs: list[bytes] | None = None, proof_type: str = "none") -> bytes`
-
-Creates a canonical CBOR TRAX Admission Envelope v1 for Packet 0. The Rust
-implementation binds the session ID, nonce, sender public key, receiver public
-key, payload hash, message type, DAG parent references, proof type, and
-signature. `session_id` must be 32 bytes, `nonce` must be 16 bytes,
-`receiver_public_key` must be 32 bytes, and each DAG parent reference must be 32
-bytes.
-
-`verify_admission_envelope_v1(envelope: bytes, payload: bytes) -> bool`
-
-Verifies the Admission Envelope v1 signature and payload hash binding using the
-sender public key embedded in the envelope.
-
-`verify_admission_envelope_v1_for_receiver(envelope: bytes, payload: bytes, receiver_public_key: bytes) -> bool`
-
-Verifies the envelope and additionally checks that it is bound to the expected
-32-byte receiver public key.
-
-`decode_admission_envelope_v1(envelope: bytes) -> dict`
-
-Decodes canonical CBOR Admission Envelope v1 bytes into a Python dictionary for
-inspection. Verification should still use `verify_admission_envelope_v1` or
-`verify_admission_envelope_v1_for_receiver`.
-
-`LocalDag()`
-
-Creates a local in-memory DAG admission history. This is ephemeral process-local
-state and is not persistent storage, distributed DAG sync, replay prevention, or
-full parent trust validation.
-
-`LocalDag.admit_packet0(envelope: bytes, payload: bytes, receiver_public_key: bytes) -> bytes`
-
-Verifies a receiver-bound Packet 0 admission envelope and appends a local DAG
-node representing the verified admission event. Returns a stable 32-byte
-admission node ID. Verification failure raises an exception and does not append.
-
-`LocalDag.len() -> int`
-
-Returns the number of local admitted Packet 0 DAG nodes.
-
-`LocalDag.is_empty() -> bool`
-
-Returns whether the local in-memory DAG has no admitted Packet 0 nodes.
-
-`receiver_id(receiver_lineage_public_key: bytes) -> bytes`
-
-Derives the domain-separated stable receiver identity used by post-genesis commitments.
-
-`LocalDag.trusted_context_from_latest_packet0() -> TrustedSessionContext`
-
-Produces opaque authoritative post-genesis context from the latest admitted Packet 0.
-
-`TrustedSessionContext.from_verified_state(...) -> TrustedSessionContext`
-
-Restores opaque context from state the application has already verified and persisted. Its fields
-are readable through accessors but cannot be mutated directly from Python.
-
-`ReceiveAdmissionWindow(context: TrustedSessionContext)`
-
-Creates Rust-owned K=8 receiver state. It retains active admission state, not permanent history.
-
-`ReceiveAdmissionWindow.stage(event: bytes, payload: bytes) -> bytes`
-
-Verifies actual payload bytes plus event context, counter, and provisional-tip continuity before
-staging. Failure leaves the provisional count unchanged.
-
-`create_segment_seal_k8(private_key: PrivateKey, events: list[bytes]) -> bytes`
-
-Creates a signed, context-bound `SegmentSealV1` for exactly eight ordered events.
-
-`verify_segment_seal_k8_intrinsic(public_key, events, seal) -> bool`
-
-Checks internal cryptographic validity only. A true result is not session admission.
-
-`verify_segment_seal_k8_for_context(context, events, seal) -> bool`
-
-Performs admission-grade verification against opaque trusted session context.
-
-`ReceiveAdmissionWindow.verify_and_commit(seal: bytes) -> list[bytes]`
-
-Atomically admits and returns exactly eight event encodings. Failure advances no committed state
-and releases no events.
-
-## Test
-
-```bash
-cargo test
-```
-
-## Benchmarks
-
-```bash
-cargo bench --bench dag_benches
-```
-
-Benchmarks include:
-
-* Ordered K=8 event commitment/Merkle-root computation
-* Signed, context-bound K=8 segment-seal creation
-* Full K=8 verification, including context, ordered root, and Ed25519 signature
-
-Historical figures for the former XOR-based length/hash check are intentionally omitted: that
-operation was not trusted segment verification. Use the benchmark command above to measure the
-real security operations on the target platform.
-
-These benchmarks measure local cryptographic and DAG operations. They do not represent end-to-end network latency, remote agent processing, or full distributed system throughput.
-
-## Conformance
-
-Conformance tests live in:
-
-```text
-tests/conformance.rs
-```
-
-Run:
-
-```bash
-cargo test
-```
-
-Current conformance coverage includes:
-
-* Deterministic CBOR behavior
-* Session ID binding
-* Segment proof validation
-
-## Examples
-
-### Handshake Demo
-
-```bash
-cargo run --example handshake_client
-cargo run --example handshake_server
-```
-
-### AAIP Scenario
-
-```bash
-cargo run --example aaip_scenario
-```
-
-The `aaip_scenario` example demonstrates the lower signed-message / packet exchange layer used by TRAX. The name is intentionally retained when referring to that lower layer.
-
-### Vector Generation
-
-```bash
-cargo run --example mint_vectors
-```
-
-## Docker Quickstart
-
-Build the image:
-
-```bash
-cd docker
-docker build -t trax-core:dev -f Dockerfile ..
-```
-
-Run the AAIP scenario:
-
-```bash
-docker run --rm -e MODE=aaip_scenario trax-core:dev
-```
-
-Generate vectors:
-
-```bash
-docker run --rm -e MODE=mint_vectors -v ${PWD}/vectors/generated:/app/vectors/generated trax-core:dev
-```
-
-Run handshake demos:
-
-```bash
-docker run --rm -e MODE=handshake_client trax-core:dev
-docker run --rm -e MODE=handshake_server trax-core:dev
-```
-
-Open a shell inside the container:
-
-```bash
-docker run --rm -it -e MODE=shell trax-core:dev
-```
-
-Compose:
-
-```bash
-docker compose -f docker/docker-compose.yml up --build
-```
-
-## Repository Hygiene
-
-Recommended `.gitignore` coverage:
-
-```gitignore
-/target/
-/criterion/
-/vectors/generated/
-.env
-.env.*
-!.env.example
-*.log
-.DS_Store
-Thumbs.db
-.vscode/
-!.vscode/settings.json
-!.vscode/extensions.json
-*.pdb
-*.ilk
-*.exe
-*.dll
-*.lib
-*.exp
-*.tmp
-*.bak
-*.swp
-```
-
-Do not ignore:
-
-```text
-src/
-tests/
-benches/
-examples/
-docs/
-```
-
-## Security Notes
-
-TRAX is experimental research and development software. It should not be treated as production-ready cryptographic infrastructure without independent review, formal testing, and security validation.
-
-The project currently demonstrates protocol mechanics, trust-chain validation, batch-signing performance, and conformance scaffolding. Additional review is recommended before deployment in sensitive environments.
-
-## License
-
-Add license information before publishing or distributing this repository.
+Licensed under the [MIT License](LICENSE).
