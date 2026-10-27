@@ -32,6 +32,28 @@ pub fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, TraxErro
     value.deserialized().map_err(|_| TraxError::Cbor)
 }
 
+/// Strict protocol decoding with a byte cap and an exact typed round trip.
+/// Unlike generic CBOR values, V2 schemas do not admit discarded semantic tags.
+pub fn decode_strict<T: serde::de::DeserializeOwned + serde::Serialize>(
+    data: &[u8],
+    max_bytes: usize,
+) -> Result<T, TraxError> {
+    if data.len() > max_bytes {
+        return Err(TraxError::InvalidInput("encoded record exceeds byte limit"));
+    }
+    let mut remaining = data;
+    let value: Value = ciborium::de::from_reader_with_recursion_limit(&mut remaining, 64)
+        .map_err(|_| TraxError::Cbor)?;
+    if !remaining.is_empty() {
+        return Err(TraxError::Cbor);
+    }
+    let decoded: T = value.deserialized().map_err(|_| TraxError::Cbor)?;
+    if encode_deterministic(&decoded)? != data {
+        return Err(TraxError::Cbor);
+    }
+    Ok(decoded)
+}
+
 fn encode_value(value: &Value) -> Result<Vec<u8>, TraxError> {
     let mut bytes = Vec::new();
     ser::into_writer(value, &mut bytes).map_err(|_| TraxError::Cbor)?;

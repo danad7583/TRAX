@@ -2,6 +2,49 @@
 
 **Trust Resolution and Agent eXchange** is a Rust library for deterministic DAG records, insertion/verification, shared negotiated configuration, checkpoint attestations, key authority, and durable history. Applications own networking, peer connections, models, and decisions about verification results.
 
+## Logical transmission profile V2
+
+New applications can use a K-free profile: one logical request or response is
+one variable-length Merkle batch. Only its final data packet carries the
+sender's Ed25519 signature. All intermediate packets remain untrusted until
+Rust independently validates the payload hashes, chain, count-bound ordered
+Merkle root, full context, and final signature. Admission is atomic; failure
+releases no authenticated application input and advances no committed nodes.
+
+Three signed genesis records (A offer, B acceptance, A confirmation) establish
+one shared anchor. Explicit host trust decisions authorize the advertised keys;
+self-signing proves possession alone. Either peer can then initiate a session.
+Requests and responses alternate across any number of rounds. Only that
+session's initiator can close it by signing the complete agreed history hash;
+the receiver mirrors the original signed terminal node without countersigning.
+
+Use `genesis::{create_genesis_offer, accept_genesis_offer, confirm_genesis,
+VerifiedGenesisV2}`, `transmission::SessionV2`, and, for fsync-before-release
+admission, `transmission_storage::DurableSessionV2`. Packet builders validate
+the full encoded frame budget, including the final signature. Byte-stream
+fragmentation reduces data capacity to leave room for authentication metadata.
+The default 1,400-byte data limit is a lab reference, separate from the default
+4,096-byte encoded packet limit; neither is a universal UDP frame size.
+
+See the [exact protocol and trust contract](docs/TRANSMISSION_V2.md),
+[public APIs and implementation report](docs/TRANSMISSION_V2_DELIVERY.md),
+and [measured performance](docs/TRANSMISSION_V2_PERFORMANCE.md).
+Run `cargo run --example transmission_v2` for a complete 100-packet request,
+17-packet response, another round, and initiator closure.
+
+Python exposes the same Rust state machine through `tx_genesis_offer`,
+`tx_genesis_accept`, `tx_genesis_confirm`, and `TransmissionSessionV2`.
+`stage_packet(packet_bytes)` returns `None` until the final signature verifies, then
+returns the complete authenticated payload. Keys remain opaque Rust objects.
+There is no arbitrary-tip restore or Python-only admission path.
+
+V2 is additive. The fixed-cadence APIs and journals below remain explicitly
+legacy profiles with their existing byte/signature semantics. They cannot be
+mixed into a V2 session. V2 pins the accepted genesis keys; live V2 rotation is
+not specified, and legacy rotation proofs cannot change those keys. A new key
+requires a newly authorized genesis and a new session. The existing paired-DAG
+rotation implementation remains available to legacy callers.
+
 ## Version 0.2 compatibility
 
 This is a breaking change from the 0.1 prototype. Deterministic CBOR now recursively sorts map keys by encoded length and then encoded bytes, rejects duplicate keys, and accepts exactly one canonical item. It replaces the prototype's declaration/insertion-order encoding.
@@ -16,11 +59,11 @@ Shared-DAG genesis explicitly binds K, signing algorithm, and runtime hash algor
 - **Same-author session windows:** `dag::TrustedSessionContext` and `ReceiveAdmissionWindow` verify ordered batches for one lineage key, one receiver, and one session. Directional windows are distinct from the shared paired-DAG model.
 - **Packet0 admission:** signed receiver-bound initial envelopes and process-local `LocalAdmissionDag` records. This helper is not persistent storage, a peer registry, or distributed synchronization.
 - **Encoding and crypto:** strict deterministic CBOR, Ed25519 signatures, hashing, HKDF session-ID derivation, and ordered Merkle roots/proofs.
-- **Optional Python bindings:** Rust-backed crypto, Packet0, and same-author session-window APIs.
+- **Optional Python bindings:** Rust-backed crypto, Packet0, legacy session windows, and V2 genesis/transmission/lifecycle APIs.
 
-TRAX does not open HTTP/transport sockets, perform an on-wire key exchange, invoke models/tools, interpret agent decisions, determine malicious intent, or send alerts. It returns validated records or errors for the application to handle.
+TRAX does not open HTTP/transport sockets, exchange encryption keys, invoke models/tools, interpret agent decisions, determine malicious intent, or send alerts. It creates and verifies signed genesis records; the host transports them and decides peer trust. It returns validated records or errors for the application to handle.
 
-## Shared paired-DAG contract
+## Legacy shared paired-DAG contract
 
 The host agrees on and authenticates one shared configuration at genesis. `ProtocolConfig::with_default_k(signing_algorithm, hash_algorithm)` selects K=8; `ProtocolConfig::new(k, signing_algorithm, hash_algorithm)` overrides the cadence. These constructors validate the supplied agreement; they do not perform network negotiation. K, signing algorithm, and hash algorithm are always serialized and required during deserialization:
 
@@ -138,6 +181,7 @@ python -m venv .venv
 python -m pip install maturin pytest
 maturin develop --release --features python
 python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py
+python -m pytest tests/test_transmission_v2.py
 ~~~
 
 Activate the environment before pip/maturin: `.venv\Scripts\Activate.ps1` on PowerShell, or `source .venv/bin/activate` on Linux. Alternatively install a wheel built by `maturin build --release --features python`.

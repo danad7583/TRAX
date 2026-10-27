@@ -46,3 +46,7 @@ criterion = "0.5"
 [[bench]]
 name = "dag_benches"
 harness = false
+
+[[bench]]
+name = "transmission_benches"
+harness = false

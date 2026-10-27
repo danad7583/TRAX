@@ -10,8 +10,8 @@ const NONCE_LEN: usize = 16;
 const HASH32_LEN: usize = 32;
 
 #[pyclass(module = "trax")]
-struct PrivateKey {
-    signing_key: ed25519_dalek::SigningKey,
+pub(crate) struct PrivateKey {
+    pub(crate) signing_key: ed25519_dalek::SigningKey,
 }
 
 #[pyclass(module = "trax")]
@@ -518,6 +518,7 @@ fn trax_error(err: crate::TraxError) -> PyErr {
 
 #[pymodule]
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    crate::python_transmission::register(module)?;
     module.add_class::<LocalDag>()?;
     module.add_class::<PrivateKey>()?;
     module.add_class::<TrustedSessionContext>()?;

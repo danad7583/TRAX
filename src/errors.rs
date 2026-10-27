@@ -74,4 +74,10 @@ pub enum TraxError {
     CorruptJournal,
     #[error("Journal write failed; reopen and inspect before further writes")]
     JournalPoisoned,
+    #[error("Transmission exceeds the negotiated resource limit")]
+    TransmissionLimit,
+    #[error("Transmission expired; provisional data discarded")]
+    TransmissionExpired,
+    #[error("Unexpected session or transmission lifecycle state")]
+    UnexpectedState,
 }

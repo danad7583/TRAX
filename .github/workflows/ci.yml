@@ -11,14 +11,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - run: cargo fmt --check
       - run: cargo build --verbose
       - run: cargo test --verbose
       - run: cargo test --all-features
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Independent V2 transcript verification
+        run: node tests/verify_transmission_vector.cjs
+      - run: cargo bench --bench transmission_benches -- --test
       - name: Build and test Python bindings
         run: |
           python -m pip install maturin pytest
           maturin build --release --features python --out dist
           python -m pip install dist/*.whl
-          python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py
+          python -m pytest tests/test_python_bindings.py tests/test_tcp_packet0_local.py tests/test_transmission_v2.py
+  msrv-sha-profile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - run: cargo test --locked --no-default-features --features crypto-ed25519,hash-sha2,serde
