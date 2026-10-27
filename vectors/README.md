@@ -1,26 +1,29 @@
-# Vectors
+# Canonical relationship transcript
 
-Some files remain structured placeholders for TRAX v1.1.0 conformance and must not be treated as
-cryptographic evidence merely because they are present. Segment-proof conformance is exercised
-with deterministic keys and event data in `tests/conformance.rs`; a future checked-in segment
-vector must encode the complete ordered `SegmentProof` and signed `SegmentCommitmentV1`.
+`relationship.cbor` is a 33,040-byte deterministic CBOR transcript containing
+the original three signed genesis nodes, two linked application sessions, six
+signed request/response transmissions, both original initiator closures, the
+complete traversable history and its final checkpoint. The second session is
+initiated by the other peer. Session one contains two request/response rounds.
 
-- Files are named by requirement mapping (see Conformance Test Plan).
-- Keep binary CBOR/COSE as raw bytes; do not JSON-wrap in production.
+SHA-512/256 of the complete file:
+`f9e1504e0aaa105315455f403500b3995a03e468620cc95df6726e25c7e9e957`.
 
-## Transmission profile V2
+Public fixed test seeds are `[1;32]` and `[2;32]`, genesis nonce `[3;32]`, and
+session nonces `[4;32]` and `[5;32]`. These are conformance fixtures, never
+deployment keys. Genesis uses unchanged schema 2 and its original signatures;
+session schema 3 authenticates continuous predecessor state.
 
-`transmission_v2.cbor` is a complete frozen canonical transcript: three signed
-genesis records, a three-packet request, a two-packet response, and the original
-initiator-signed terminal artifact and final checkpoint. It uses public test
-seeds `[1;32]` and `[2;32]`, genesis nonce `[3;32]`, session nonce `[4;32]`, and
-SHA-512/256. These are test keys, never deployment keys.
+`tests/transcript.rs` verifies the fixed artifacts without recreating signatures.
+`node tests/verify_transcript.cjs` independently implements CBOR, SHA-512/256,
+Merkle construction, record IDs/digests and boundary checks, and uses
+Node/OpenSSL Ed25519 to verify every original signature. It imports no TRAX code.
 
-The 6,160-byte vector's SHA-512/256 is
-`1c524040831fa1f2c43fa1f68e6520fdef0982b1e83fa3dec177e309774dfaff`.
-Rust admission tests consume the fixed signatures; the independent
-`node tests/verify_transmission_vector.cjs` implementation reconstructs CBOR,
-hash chains, count-bound Merkle roots and the complete transcript, then verifies
-all original signatures using Node/OpenSSL Ed25519. It imports no TRAX code.
-`cargo run --example transmission_vectors` explicitly regenerates this file;
-normal tests never rewrite it. Changes require deliberate protocol review.
+`cargo run --example generate_transcript` deliberately regenerates the file.
+Normal tests never rewrite it. Review protocol and digest changes before
+accepting a regenerated artifact, then rerun the independent verifier.
+
+The separate `tests/fixtures/standalone_session.cbor` is rejected-format test
+data only. It preserves earlier valid signed packet bytes for downgrade/domain
+substitution regressions and proves unchanged genesis bytes. No historical
+authentication implementation or positive compatibility path is retained.

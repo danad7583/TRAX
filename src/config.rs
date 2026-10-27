@@ -1,43 +1,24 @@
-//! Explicit application-selected segment cadence.
+//! Explicit cryptographic profile and bounded transmission resources.
 
-use crate::errors::TraxError;
+use crate::TraxError;
 use serde::{Deserialize, Serialize};
 
-/// Cadence selected by `ProtocolConfig::with_default_k`, recorded explicitly
-/// in the resulting configuration and serialized genesis.
-pub const DEFAULT_K: usize = 8;
+/// Wire schema retained by the three-record authenticated genesis.
+pub const GENESIS_SCHEMA_VERSION: u8 = 2;
+/// Wire schema for continuous relationship sessions.
+pub const SESSION_SCHEMA_VERSION: u8 = 3;
+pub const MAX_TRANSMISSION_PACKETS: u32 = 1_048_576;
+pub const MAX_TRANSMISSION_PAYLOAD_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_WIRE_PACKET_BYTES: u32 = 1024 * 1024;
+pub const MAX_TRANSMISSION_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// A positive segment size representable by the signed commitment's `u32` K.
-///
-/// No implicit cadence is selected: applications must construct this value and
-/// keep the same configuration at signing and receiving boundaries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SegmentConfig {
-    k: usize,
-}
-
-impl SegmentConfig {
-    pub fn new(k: usize) -> Result<Self, TraxError> {
-        if k == 0 || u32::try_from(k).is_err() {
-            return Err(TraxError::InvalidSegmentSize);
-        }
-        Ok(Self { k })
-    }
-
-    pub const fn k(self) -> usize {
-        self.k
-    }
-}
-
-/// Signing algorithms understood by this protocol version.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SigningAlgorithm {
     #[serde(rename = "ed25519")]
     Ed25519,
 }
 
-/// Runtime-selected graph hashing; this is independent of the legacy hash32
-/// helper's compile-time profile.
+/// SHA-512/256 is always available; BLAKE3 requires its explicit build feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HashAlgorithm {
     #[serde(rename = "blake3")]
@@ -45,85 +26,90 @@ pub enum HashAlgorithm {
     #[serde(rename = "sha512-256")]
     Sha512256,
 }
-
-/// Explicit shared configuration to bind into negotiated genesis state.
-///
-/// Fields cannot be changed independently. Deserialization takes the same
-/// validation path as construction, including build-feature availability;
-/// callers may also call `validate` when accepting a configuration boundary.
-/// Algorithms are always explicit. `with_default_k` selects `DEFAULT_K` at
-/// construction; serialized configurations must still include K.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, try_from = "ProtocolConfigWire")]
-pub struct ProtocolConfig {
-    k: usize,
-    signing_algorithm: SigningAlgorithm,
-    hash_algorithm: HashAlgorithm,
-}
-
-#[derive(Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ProtocolConfigWire {
-    k: usize,
-    signing_algorithm: SigningAlgorithm,
-    hash_algorithm: HashAlgorithm,
+pub struct TransmissionLimits {
+    pub max_packets: u32,
+    pub max_payload_bytes: u64,
+    pub max_packet_payload_bytes: u32,
+    pub max_wire_packet_bytes: u32,
+    pub timeout_ms: u64,
 }
 
-impl TryFrom<ProtocolConfigWire> for ProtocolConfig {
-    type Error = TraxError;
-
-    fn try_from(wire: ProtocolConfigWire) -> Result<Self, Self::Error> {
-        Self::new(wire.k, wire.signing_algorithm, wire.hash_algorithm)
+impl Default for TransmissionLimits {
+    fn default() -> Self {
+        Self {
+            max_packets: 16_384,
+            max_payload_bytes: 16 * 1024 * 1024,
+            max_packet_payload_bytes: 1400,
+            max_wire_packet_bytes: 4096,
+            timeout_ms: 30_000,
+        }
     }
 }
 
-impl ProtocolConfig {
-    pub fn with_default_k(
-        signing_algorithm: SigningAlgorithm,
-        hash_algorithm: HashAlgorithm,
-    ) -> Result<Self, TraxError> {
-        Self::new(DEFAULT_K, signing_algorithm, hash_algorithm)
+impl TransmissionLimits {
+    pub fn validate(&self) -> Result<(), TraxError> {
+        if self.max_packets == 0 || self.max_packets > MAX_TRANSMISSION_PACKETS {
+            return Err(TraxError::InvalidInput(
+                "packet-count limit is out of bounds",
+            ));
+        }
+        if self.max_payload_bytes == 0 || self.max_payload_bytes > MAX_TRANSMISSION_PAYLOAD_BYTES {
+            return Err(TraxError::InvalidInput(
+                "transmission payload limit is out of bounds",
+            ));
+        }
+        if self.max_wire_packet_bytes == 0 || self.max_wire_packet_bytes > MAX_WIRE_PACKET_BYTES {
+            return Err(TraxError::InvalidInput(
+                "encoded-packet limit is out of bounds",
+            ));
+        }
+        if self.max_packet_payload_bytes == 0
+            || u64::from(self.max_packet_payload_bytes) > self.max_payload_bytes
+            || self.max_packet_payload_bytes > self.max_wire_packet_bytes
+        {
+            return Err(TraxError::InvalidInput(
+                "per-packet payload limit is out of bounds",
+            ));
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_TRANSMISSION_TIMEOUT_MS {
+            return Err(TraxError::InvalidInput(
+                "provisional timeout is out of bounds",
+            ));
+        }
+        Ok(())
     }
+}
 
-    pub fn new(
-        k: usize,
-        signing_algorithm: SigningAlgorithm,
-        hash_algorithm: HashAlgorithm,
-    ) -> Result<Self, TraxError> {
-        let config = Self {
-            k,
-            signing_algorithm,
-            hash_algorithm,
-        };
-        config.validate()?;
-        Ok(config)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransmissionProfile {
+    pub version: u8,
+    pub signing_algorithm: SigningAlgorithm,
+    pub hash_algorithm: HashAlgorithm,
+    pub limits: TransmissionLimits,
+}
+
+impl Default for TransmissionProfile {
+    fn default() -> Self {
+        Self {
+            version: GENESIS_SCHEMA_VERSION,
+            signing_algorithm: SigningAlgorithm::Ed25519,
+            hash_algorithm: HashAlgorithm::Sha512256,
+            limits: TransmissionLimits::default(),
+        }
     }
+}
 
-    pub const fn k(self) -> usize {
-        self.k
-    }
-
-    pub const fn segment(self) -> SegmentConfig {
-        SegmentConfig { k: self.k }
-    }
-
-    pub const fn signing_algorithm(self) -> SigningAlgorithm {
-        self.signing_algorithm
-    }
-
-    pub const fn hash_algorithm(self) -> HashAlgorithm {
-        self.hash_algorithm
-    }
-
-    pub fn validate(self) -> Result<(), TraxError> {
-        SegmentConfig::new(self.k)?;
-        if self.k <= 4 {
-            return Err(TraxError::InvalidSegmentSize);
+impl TransmissionProfile {
+    pub fn validate(&self) -> Result<(), TraxError> {
+        if self.version != GENESIS_SCHEMA_VERSION {
+            return Err(TraxError::InvalidInput(
+                "unsupported transmission profile version",
+            ));
         }
         match self.signing_algorithm {
-            SigningAlgorithm::Ed25519 if !cfg!(feature = "crypto-ed25519") => {
-                return Err(TraxError::UnsupportedAlgorithm);
-            }
             SigningAlgorithm::Ed25519 => {}
         }
         match self.hash_algorithm {
@@ -132,26 +118,6 @@ impl ProtocolConfig {
             }
             HashAlgorithm::Blake3 | HashAlgorithm::Sha512256 => {}
         }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn segment_size_is_explicit_positive_and_representable() {
-        assert!(SegmentConfig::new(0).is_err());
-        for k in [1, 3, 4, 5, 8, 14] {
-            assert_eq!(SegmentConfig::new(k).unwrap().k(), k);
-        }
-        assert_eq!(
-            SegmentConfig::new(u32::MAX as usize).unwrap().k(),
-            u32::MAX as usize
-        );
-        if let Ok(too_large) = usize::try_from(u64::from(u32::MAX) + 1) {
-            assert!(SegmentConfig::new(too_large).is_err());
-        }
+        self.limits.validate()
     }
 }

@@ -2,8 +2,7 @@ use ciborium::value::Value;
 use serde::ser::SerializeMap;
 use serde::{Serialize, Serializer};
 use std::collections::BTreeMap;
-use trax::encoding::{cose_sign1, decode, encode_deterministic};
-use trax::{ProtectedHeaders, TraxError};
+use trax::encoding::{decode_strict, encode_deterministic};
 
 // A map whose serializer deliberately preserves the supplied insertion order.
 struct OrderedMap(Vec<(&'static str, u64)>);
@@ -26,7 +25,7 @@ fn map_insertion_order_does_not_change_bytes() {
     assert_eq!(encode_deterministic(&left).unwrap(), expected);
     assert_eq!(encode_deterministic(&right).unwrap(), expected);
     assert_eq!(
-        decode::<BTreeMap<String, u64>>(&expected).unwrap(),
+        bounded_decode::<BTreeMap<String, u64>>(&expected).unwrap(),
         BTreeMap::from([("aa".to_owned(), 2), ("z".to_owned(), 1)])
     );
 }
@@ -49,7 +48,7 @@ fn nested_maps_are_normalized_in_arrays_and_tagged_values() {
     )]);
     let bytes = encode_deterministic(&left).unwrap();
     assert_eq!(bytes, encode_deterministic(&right).unwrap());
-    assert_eq!(decode::<Value>(&bytes).unwrap(), right);
+    assert_eq!(bounded_decode::<Value>(&bytes).unwrap(), right);
 }
 
 #[test]
@@ -70,9 +69,9 @@ fn duplicate_keys_are_rejected_before_type_deserialization() {
     assert!(encode_deterministic(&OrderedMap(vec![("a", 1), ("a", 2)])).is_err());
     // A BTreeMap deserializer could otherwise silently replace the first value.
     let duplicate = [0xa2, 0x61, b'a', 1, 0x61, b'a', 2];
-    assert!(decode::<BTreeMap<String, u64>>(&duplicate).is_err());
+    assert!(bounded_decode::<BTreeMap<String, u64>>(&duplicate).is_err());
     let nested = [0x81, 0xa2, 0x61, b'a', 1, 0x61, b'a', 2];
-    assert!(decode::<Value>(&nested).is_err());
+    assert!(bounded_decode::<Value>(&nested).is_err());
 }
 
 #[test]
@@ -94,14 +93,17 @@ fn duplicate_complex_keys_are_detected_after_normalization() {
 #[test]
 fn decoder_rejects_trailing_items_or_garbage() {
     for bytes in [[0x01, 0x02], [0x01, 0xff]] {
-        assert!(decode::<u64>(&bytes).is_err());
+        assert!(bounded_decode::<u64>(&bytes).is_err());
     }
 }
 
 #[test]
 fn decoder_rejects_malformed_cbor() {
     for bytes in [&[][..], &[0xa1][..], &[0x61, 0xff][..], &[0xff][..]] {
-        assert!(decode::<Value>(bytes).is_err(), "accepted {bytes:x?}");
+        assert!(
+            bounded_decode::<Value>(bytes).is_err(),
+            "accepted {bytes:x?}"
+        );
     }
 }
 
@@ -117,7 +119,10 @@ fn decoder_rejects_non_deterministic_representations() {
         // 1.0 encoded as a 64-bit float instead of an exact half-precision value.
         &[0xfb, 0x3f, 0xf0, 0, 0, 0, 0, 0, 0][..],
     ] {
-        assert!(decode::<Value>(bytes).is_err(), "accepted {bytes:x?}");
+        assert!(
+            bounded_decode::<Value>(bytes).is_err(),
+            "accepted {bytes:x?}"
+        );
     }
 }
 
@@ -129,30 +134,45 @@ fn floating_point_nan_has_one_encoding_and_negative_zero_is_preserved() {
         encode_deterministic(&f64::from_bits(0xfff8_0000_0000_0042)).unwrap(),
         nan
     );
-    assert!(decode::<f64>(&nan).unwrap().is_nan());
-    assert!(decode::<f64>(&[0xf9, 0x7e, 0x01]).is_err());
+    assert!(bounded_decode::<f64>(&nan).unwrap().is_nan());
+    assert!(bounded_decode::<f64>(&[0xf9, 0x7e, 0x01]).is_err());
     let negative_zero = encode_deterministic(&-0.0_f64).unwrap();
     assert_eq!(negative_zero, [0xf9, 0x80, 0]);
     assert_eq!(
-        decode::<f64>(&negative_zero).unwrap().to_bits(),
+        bounded_decode::<f64>(&negative_zero).unwrap().to_bits(),
         (-0.0_f64).to_bits()
     );
 }
 
+fn bounded_decode<T: serde::de::DeserializeOwned + Serialize>(
+    data: &[u8],
+) -> Result<T, trax::TraxError> {
+    decode_strict(data, 4096)
+}
+
 #[test]
-fn unimplemented_cose_signing_cannot_return_unsigned_success() {
-    let headers = ProtectedHeaders {
-        aaip_ver: "1".to_owned(),
-        trax_ver: "1".to_owned(),
-        alg: "EdDSA".to_owned(),
-        kid: vec![],
-        msg_type: "test".to_owned(),
-        schema_id: "test".to_owned(),
-    };
-    assert!(matches!(
-        cose_sign1(&headers, b"payload", &[0; 32]),
-        Err(TraxError::InvalidInput(
-            "COSE_Sign1 signing is not implemented"
-        ))
-    ));
+fn decoder_enforces_the_callers_byte_cap_and_parser_depth() {
+    assert_eq!(decode_strict::<u64>(&[1], 1).unwrap(), 1);
+    assert!(decode_strict::<u64>(&[1], 0).is_err());
+    let mut deeply_nested = vec![0x81; 65];
+    deeply_nested.push(0);
+    assert!(decode_strict::<Value>(&deeply_nested, deeply_nested.len()).is_err());
+    let mut shallow = vec![0x81; 8];
+    shallow.push(0);
+    assert!(decode_strict::<Value>(&shallow, shallow.len()).is_ok());
+}
+
+#[test]
+fn typed_round_trip_rejects_tags_unknown_fields_and_changed_wire_types() {
+    assert!(decode_strict::<u64>(&[0xc0, 0x01], 32).is_err());
+    #[derive(Debug, serde::Deserialize, Serialize)]
+    struct OnlyKnown {
+        a: u64,
+    }
+    // Typed deserialization would otherwise discard the unknown key.
+    let unknown = [0xa2, 0x61, b'a', 1, 0x61, b'b', 2];
+    assert!(decode_strict::<OnlyKnown>(&unknown, 32).is_err());
+    // Serde can deserialize a byte string as Vec<u8>, but re-encoding is an
+    // integer array unless the field explicitly declares its byte-string type.
+    assert!(decode_strict::<Vec<u8>>(&[0x41, 1], 32).is_err());
 }

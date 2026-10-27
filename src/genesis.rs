@@ -1,133 +1,25 @@
-//! K-free, three-record V2 genesis with explicit caller authorization.
+//! Three-record genesis with explicit caller authorization.
 //!
 //! Signatures establish key possession; the trust callback separately decides
 //! which identities the host authorizes. Nonce freshness and retirement policy
-//! belong to that host. Legacy Packet 0 and rotation proofs cannot replace this
+//! belong to that host. Other proof schemas cannot replace this
 //! transcript or change its pinned participant keys.
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{HashAlgorithm, SigningAlgorithm};
-use crate::crypto::{ed25519_sign, ed25519_verify};
+use crate::config::{TransmissionProfile, GENESIS_SCHEMA_VERSION};
+use crate::crypto::{ed25519_sign, ed25519_verify, hash_domain};
 use crate::encoding::encode_deterministic;
-use crate::transmission_crypto::hash_v2;
 use crate::TraxError;
-
-pub const TRANSMISSION_VERSION_V2: u8 = 2;
-pub const MAX_TRANSMISSION_PACKETS_V2: u32 = 1_048_576;
-pub const MAX_TRANSMISSION_PAYLOAD_BYTES_V2: u64 = 256 * 1024 * 1024;
-pub const MAX_WIRE_PACKET_BYTES_V2: u32 = 1024 * 1024;
-pub const MAX_TRANSMISSION_TIMEOUT_MS_V2: u64 = 24 * 60 * 60 * 1000;
 
 const GENESIS_DOMAIN: &[u8] = b"TRAX:GENESIS:V2\0";
 const NODE_DOMAIN: &[u8] = b"TRAX:GENESIS:NODE:V2\0";
 const ANCHOR_DOMAIN: &[u8] = b"TRAX:GENESIS:ANCHOR:V2\0";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransmissionLimitsV2 {
-    pub max_packets: u32,
-    pub max_payload_bytes: u64,
-    pub max_packet_payload_bytes: u32,
-    pub max_wire_packet_bytes: u32,
-    pub timeout_ms: u64,
-}
-
-impl Default for TransmissionLimitsV2 {
-    fn default() -> Self {
-        Self {
-            max_packets: 16_384,
-            max_payload_bytes: 16 * 1024 * 1024,
-            max_packet_payload_bytes: 1400,
-            max_wire_packet_bytes: 4096,
-            timeout_ms: 30_000,
-        }
-    }
-}
-
-impl TransmissionLimitsV2 {
-    pub fn validate(&self) -> Result<(), TraxError> {
-        if self.max_packets == 0 || self.max_packets > MAX_TRANSMISSION_PACKETS_V2 {
-            return Err(TraxError::InvalidInput(
-                "V2 packet-count limit is out of bounds",
-            ));
-        }
-        if self.max_payload_bytes == 0 || self.max_payload_bytes > MAX_TRANSMISSION_PAYLOAD_BYTES_V2
-        {
-            return Err(TraxError::InvalidInput(
-                "V2 transmission payload limit is out of bounds",
-            ));
-        }
-        if self.max_wire_packet_bytes == 0 || self.max_wire_packet_bytes > MAX_WIRE_PACKET_BYTES_V2
-        {
-            return Err(TraxError::InvalidInput(
-                "V2 encoded-packet limit is out of bounds",
-            ));
-        }
-        if self.max_packet_payload_bytes == 0
-            || u64::from(self.max_packet_payload_bytes) > self.max_payload_bytes
-            || self.max_packet_payload_bytes > self.max_wire_packet_bytes
-        {
-            return Err(TraxError::InvalidInput(
-                "V2 per-packet payload limit is out of bounds",
-            ));
-        }
-        if self.timeout_ms == 0 || self.timeout_ms > MAX_TRANSMISSION_TIMEOUT_MS_V2 {
-            return Err(TraxError::InvalidInput(
-                "V2 provisional timeout is out of bounds",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TransmissionProfileV2 {
-    pub version: u8,
-    pub signing_algorithm: SigningAlgorithm,
-    pub hash_algorithm: HashAlgorithm,
-    pub limits: TransmissionLimitsV2,
-}
-
-impl Default for TransmissionProfileV2 {
-    fn default() -> Self {
-        Self {
-            version: TRANSMISSION_VERSION_V2,
-            signing_algorithm: SigningAlgorithm::Ed25519,
-            hash_algorithm: HashAlgorithm::Sha512256,
-            limits: TransmissionLimitsV2::default(),
-        }
-    }
-}
-
-impl TransmissionProfileV2 {
-    pub fn validate(&self) -> Result<(), TraxError> {
-        if self.version != TRANSMISSION_VERSION_V2 {
-            return Err(TraxError::InvalidInput(
-                "unsupported transmission profile version",
-            ));
-        }
-        match self.signing_algorithm {
-            SigningAlgorithm::Ed25519 if !cfg!(feature = "crypto-ed25519") => {
-                return Err(TraxError::UnsupportedAlgorithm);
-            }
-            SigningAlgorithm::Ed25519 => {}
-        }
-        match self.hash_algorithm {
-            HashAlgorithm::Blake3 if !cfg!(feature = "hash-blake3") => {
-                return Err(TraxError::UnsupportedAlgorithm);
-            }
-            HashAlgorithm::Blake3 | HashAlgorithm::Sha512256 => {}
-        }
-        self.limits.validate()
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GenesisStepV2 {
+pub enum GenesisStep {
     Offer,
     Accept,
     Confirm,
@@ -135,9 +27,9 @@ pub enum GenesisStepV2 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GenesisEventV2 {
+pub struct GenesisEvent {
     pub version: u8,
-    pub step: GenesisStepV2,
+    pub step: GenesisStep,
     #[serde(with = "bytes32")]
     pub previous_tip: [u8; 32],
     #[serde(with = "bytes32")]
@@ -146,19 +38,19 @@ pub struct GenesisEventV2 {
     pub initiator_public_key: [u8; 32],
     #[serde(with = "optional_bytes32")]
     pub responder_public_key: Option<[u8; 32]>,
-    pub profile: TransmissionProfileV2,
+    pub profile: TransmissionProfile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GenesisNodeV2 {
-    pub event: GenesisEventV2,
+pub struct GenesisNode {
+    pub event: GenesisEvent,
     #[serde(with = "serde_bytes")]
     pub signature: Vec<u8>,
 }
 
 /// A transcript identifier alone is not authentication or caller authorization.
-pub fn genesis_node_id(node: &GenesisNodeV2) -> Result<[u8; 32], TraxError> {
+pub fn genesis_node_id(node: &GenesisNode) -> Result<[u8; 32], TraxError> {
     node.event.profile.validate()?;
     hash_encoded(&node.event.profile, NODE_DOMAIN, node)
 }
@@ -166,14 +58,14 @@ pub fn genesis_node_id(node: &GenesisNodeV2) -> Result<[u8; 32], TraxError> {
 pub fn create_genesis_offer(
     key: &SigningKey,
     nonce: [u8; 32],
-    profile: TransmissionProfileV2,
-) -> Result<GenesisNodeV2, TraxError> {
+    profile: TransmissionProfile,
+) -> Result<GenesisNode, TraxError> {
     profile.validate()?;
     checked_key(&key.verifying_key().to_bytes())?;
     sign_event(
-        GenesisEventV2 {
-            version: TRANSMISSION_VERSION_V2,
-            step: GenesisStepV2::Offer,
+        GenesisEvent {
+            version: GENESIS_SCHEMA_VERSION,
+            step: GenesisStep::Offer,
             previous_tip: [0; 32],
             nonce,
             initiator_public_key: key.verifying_key().to_bytes(),
@@ -185,10 +77,10 @@ pub fn create_genesis_offer(
 }
 
 pub fn accept_genesis_offer(
-    offer: &GenesisNodeV2,
+    offer: &GenesisNode,
     key: &SigningKey,
     mut trust: impl FnMut(&[u8; 32]) -> bool,
-) -> Result<GenesisNodeV2, TraxError> {
+) -> Result<GenesisNode, TraxError> {
     verify_offer(offer)?;
     let responder = key.verifying_key().to_bytes();
     checked_key(&responder)?;
@@ -199,47 +91,47 @@ pub fn accept_genesis_offer(
     }
     authorize(&offer.event.initiator_public_key, &mut trust)?;
     let mut event = offer.event.clone();
-    event.step = GenesisStepV2::Accept;
+    event.step = GenesisStep::Accept;
     event.previous_tip = genesis_node_id(offer)?;
     event.responder_public_key = Some(responder);
     sign_event(event, key)
 }
 
 pub fn confirm_genesis(
-    offer: &GenesisNodeV2,
-    acceptance: &GenesisNodeV2,
+    offer: &GenesisNode,
+    acceptance: &GenesisNode,
     key: &SigningKey,
     mut trust: impl FnMut(&[u8; 32]) -> bool,
-) -> Result<GenesisNodeV2, TraxError> {
+) -> Result<GenesisNode, TraxError> {
     let responder = verify_offer_and_acceptance(offer, acceptance)?;
     if key.verifying_key().to_bytes() != offer.event.initiator_public_key {
         return Err(TraxError::SignerMismatch);
     }
     authorize(&responder, &mut trust)?;
     let mut event = acceptance.event.clone();
-    event.step = GenesisStepV2::Confirm;
+    event.step = GenesisStep::Confirm;
     event.previous_tip = genesis_node_id(acceptance)?;
     sign_event(event, key)
 }
 
-/// Fully authenticated and explicitly authorized V2 genesis. No deserialize or
+/// Fully authenticated and explicitly authorized genesis. No deserialize or
 /// unchecked constructor exists, and its shared anchor covers all three signed
 /// records. Verification does not establish freshness against a rolled-back host.
 #[derive(Debug, Clone)]
-pub struct VerifiedGenesisV2 {
-    nodes: [GenesisNodeV2; 3],
+pub struct VerifiedGenesis {
+    nodes: [GenesisNode; 3],
     anchor: [u8; 32],
 }
 
-impl VerifiedGenesisV2 {
+impl VerifiedGenesis {
     pub fn verify(
-        nodes: [GenesisNodeV2; 3],
+        nodes: [GenesisNode; 3],
         mut trust: impl FnMut(&[u8; 32]) -> bool,
     ) -> Result<Self, TraxError> {
         let responder = verify_offer_and_acceptance(&nodes[0], &nodes[1])?;
         let confirmation = &nodes[2];
         verify_event_shape(&confirmation.event)?;
-        if confirmation.event.step != GenesisStepV2::Confirm
+        if confirmation.event.step != GenesisStep::Confirm
             || !same_parameters(&nodes[1].event, &confirmation.event)
             || confirmation.event.responder_public_key != Some(responder)
         {
@@ -248,7 +140,7 @@ impl VerifiedGenesisV2 {
             ));
         }
         if confirmation.event.previous_tip != genesis_node_id(&nodes[1])? {
-            return Err(TraxError::TipMismatch);
+            return Err(TraxError::RelationshipMismatch);
         }
         verify_signature(confirmation, &nodes[0].event.initiator_public_key)?;
         // Never invoke caller policy on a transcript that has failed its
@@ -259,13 +151,13 @@ impl VerifiedGenesisV2 {
         Ok(Self { nodes, anchor })
     }
 
-    pub fn nodes(&self) -> &[GenesisNodeV2; 3] {
+    pub fn nodes(&self) -> &[GenesisNode; 3] {
         &self.nodes
     }
     pub fn anchor(&self) -> [u8; 32] {
         self.anchor
     }
-    pub fn profile(&self) -> &TransmissionProfileV2 {
+    pub fn profile(&self) -> &TransmissionProfile {
         &self.nodes[0].event.profile
     }
     pub fn initiator_key(&self) -> [u8; 32] {
@@ -280,12 +172,12 @@ impl VerifiedGenesisV2 {
 }
 
 fn hash_encoded<T: Serialize>(
-    profile: &TransmissionProfileV2,
+    profile: &TransmissionProfile,
     domain: &[u8],
     value: &T,
 ) -> Result<[u8; 32], TraxError> {
     let encoded = encode_deterministic(value)?;
-    hash_v2(profile.hash_algorithm, domain, &[&encoded])
+    hash_domain(profile.hash_algorithm, domain, &[&encoded])
 }
 
 fn checked_key(bytes: &[u8; 32]) -> Result<VerifyingKey, TraxError> {
@@ -296,7 +188,7 @@ fn checked_key(bytes: &[u8; 32]) -> Result<VerifyingKey, TraxError> {
     Ok(key)
 }
 
-fn event_signing_bytes(event: &GenesisEventV2) -> Result<Vec<u8>, TraxError> {
+fn event_signing_bytes(event: &GenesisEvent) -> Result<Vec<u8>, TraxError> {
     let encoded = encode_deterministic(event)?;
     let mut bytes = Vec::with_capacity(GENESIS_DOMAIN.len() + encoded.len());
     bytes.extend_from_slice(GENESIS_DOMAIN);
@@ -304,12 +196,12 @@ fn event_signing_bytes(event: &GenesisEventV2) -> Result<Vec<u8>, TraxError> {
     Ok(bytes)
 }
 
-fn sign_event(event: GenesisEventV2, key: &SigningKey) -> Result<GenesisNodeV2, TraxError> {
+fn sign_event(event: GenesisEvent, key: &SigningKey) -> Result<GenesisNode, TraxError> {
     let signature = ed25519_sign(key, &event_signing_bytes(&event)?);
-    Ok(GenesisNodeV2 { event, signature })
+    Ok(GenesisNode { event, signature })
 }
 
-fn verify_signature(node: &GenesisNodeV2, expected_key: &[u8; 32]) -> Result<(), TraxError> {
+fn verify_signature(node: &GenesisNode, expected_key: &[u8; 32]) -> Result<(), TraxError> {
     if node.signature.len() != 64
         || !ed25519_verify(
             &checked_key(expected_key)?,
@@ -322,8 +214,8 @@ fn verify_signature(node: &GenesisNodeV2, expected_key: &[u8; 32]) -> Result<(),
     Ok(())
 }
 
-fn verify_event_shape(event: &GenesisEventV2) -> Result<(), TraxError> {
-    if event.version != TRANSMISSION_VERSION_V2 {
+fn verify_event_shape(event: &GenesisEvent) -> Result<(), TraxError> {
+    if event.version != GENESIS_SCHEMA_VERSION {
         return Err(TraxError::InvalidInput("unsupported genesis event version"));
     }
     event.profile.validate()?;
@@ -339,9 +231,9 @@ fn verify_event_shape(event: &GenesisEventV2) -> Result<(), TraxError> {
     Ok(())
 }
 
-fn verify_offer(offer: &GenesisNodeV2) -> Result<(), TraxError> {
+fn verify_offer(offer: &GenesisNode) -> Result<(), TraxError> {
     verify_event_shape(&offer.event)?;
-    if offer.event.step != GenesisStepV2::Offer
+    if offer.event.step != GenesisStep::Offer
         || offer.event.previous_tip != [0; 32]
         || offer.event.responder_public_key.is_some()
     {
@@ -350,7 +242,7 @@ fn verify_offer(offer: &GenesisNodeV2) -> Result<(), TraxError> {
     verify_signature(offer, &offer.event.initiator_public_key)
 }
 
-fn same_parameters(first: &GenesisEventV2, second: &GenesisEventV2) -> bool {
+fn same_parameters(first: &GenesisEvent, second: &GenesisEvent) -> bool {
     first.version == second.version
         && first.nonce == second.nonce
         && first.initiator_public_key == second.initiator_public_key
@@ -358,8 +250,8 @@ fn same_parameters(first: &GenesisEventV2, second: &GenesisEventV2) -> bool {
 }
 
 fn verify_offer_and_acceptance(
-    offer: &GenesisNodeV2,
-    acceptance: &GenesisNodeV2,
+    offer: &GenesisNode,
+    acceptance: &GenesisNode,
 ) -> Result<[u8; 32], TraxError> {
     verify_offer(offer)?;
     verify_event_shape(&acceptance.event)?;
@@ -369,7 +261,7 @@ fn verify_offer_and_acceptance(
         .ok_or(TraxError::InvalidInput(
             "genesis acceptance needs a responder key",
         ))?;
-    if acceptance.event.step != GenesisStepV2::Accept
+    if acceptance.event.step != GenesisStep::Accept
         || !same_parameters(&offer.event, &acceptance.event)
     {
         return Err(TraxError::InvalidInput(
@@ -377,7 +269,7 @@ fn verify_offer_and_acceptance(
         ));
     }
     if acceptance.event.previous_tip != genesis_node_id(offer)? {
-        return Err(TraxError::TipMismatch);
+        return Err(TraxError::RelationshipMismatch);
     }
     verify_signature(acceptance, &responder)?;
     Ok(responder)
@@ -392,7 +284,7 @@ fn authorize(key: &[u8; 32], trust: &mut impl FnMut(&[u8; 32]) -> bool) -> Resul
     Ok(())
 }
 
-/// Exact byte-string representation shared by V2 hashes, keys and nonces.
+/// Exact byte-string representation shared by protocol hashes, keys and nonces.
 pub(crate) mod bytes32 {
     use serde::{
         de::{Error, Visitor},
@@ -423,7 +315,7 @@ pub(crate) mod bytes32 {
     }
 }
 
-mod optional_bytes32 {
+pub(crate) mod optional_bytes32 {
     use serde::{de::Visitor, Deserializer, Serializer};
     use std::fmt;
 

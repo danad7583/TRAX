@@ -1,51 +1,36 @@
 [package]
 name = "trax"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT"
-description = "Immutable fork-only DAG operations, configurable signed checkpoints, key lineage verification, and durable history."
+description = "Authenticated genesis, continuous mirrored relationship history, and variable-length signed transmissions."
 repository = "https://github.com/danad7583/TRAX"
-keywords = ["trax", "aaip", "agents", "security", "dag"]
+keywords = ["trax", "agents", "security", "dag", "merkle"]
 
 [lib]
 crate-type = ["rlib", "cdylib"]
 
 [features]
-default = ["crypto-ed25519", "hash-blake3", "serde"]
-no_std = []
-crypto-ed25519 = ["ed25519-dalek"]
-crypto-x25519 = ["x25519-dalek"]
-hash-blake3 = ["blake3"]
-hash-sha2 = []
-serde = ["dep:serde", "dep:serde_bytes"]
-python = ["dep:pyo3"]
+default = ["hash-blake3"]
+hash-blake3 = ["dep:blake3"]
+python = ["dep:pyo3", "dep:rand"]
 
 [dependencies]
-serde = { version = "1", features = ["derive"], optional = true }
-serde_bytes = { version = "0.11", optional = true }
-coset = "0.3.8"
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 ciborium = { version = "0.2.2" }
-half = "2.4"
-ed25519-dalek = { version = "2", optional = true, default-features = false, features = ["rand_core"] }
-x25519-dalek = { version = "2", optional = true, default-features = false }
-rand_core = "0.6"
+ed25519-dalek = { version = "2", default-features = false, features = ["rand_core"] }
 blake3 = { version = "1", optional = true }
 sha2 = "0.10"
-hkdf = "0.12"
-lru = "0.12"
 thiserror = "1"
-rand = "0.8"
+rand = { version = "0.8", optional = true }
 pyo3 = { version = "0.22", optional = true, features = ["extension-module"] }
 
 [dev-dependencies]
 hex = "0.4"
 rand = "0.8"
 criterion = "0.5"
-
-[[bench]]
-name = "dag_benches"
-harness = false
 
 [[bench]]
 name = "transmission_benches"

@@ -4,8 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "trax"
-version = "0.2.0"
-description = "Python bindings for TRAX DAG verification and configurable checkpoints."
+version = "0.3.0"
+description = "Python bindings for authenticated TRAX relationships, mirrored history, and signed transmissions."
 requires-python = ">=3.8"
 license = { text = "MIT" }
 

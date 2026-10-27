@@ -1,15 +1,16 @@
 use ciborium::value::Value;
 use ed25519_dalek::SigningKey;
-use trax::config::HashAlgorithm;
+use trax::config::{
+    HashAlgorithm, TransmissionLimits, TransmissionProfile, MAX_TRANSMISSION_PACKETS,
+    MAX_TRANSMISSION_PAYLOAD_BYTES, MAX_TRANSMISSION_TIMEOUT_MS, MAX_WIRE_PACKET_BYTES,
+};
 use trax::crypto::ed25519_sign;
+use trax::crypto::hash_domain;
 use trax::encoding::{decode_strict, encode_deterministic};
 use trax::genesis::{
-    accept_genesis_offer, confirm_genesis, create_genesis_offer, genesis_node_id, GenesisNodeV2,
-    GenesisStepV2, TransmissionLimitsV2, TransmissionProfileV2, VerifiedGenesisV2,
-    MAX_TRANSMISSION_PACKETS_V2, MAX_TRANSMISSION_PAYLOAD_BYTES_V2, MAX_TRANSMISSION_TIMEOUT_MS_V2,
-    MAX_WIRE_PACKET_BYTES_V2,
+    accept_genesis_offer, confirm_genesis, create_genesis_offer, genesis_node_id, GenesisNode,
+    GenesisStep, VerifiedGenesis,
 };
-use trax::transmission_crypto::hash_v2;
 
 struct Fixture {
     a: SigningKey,
@@ -25,7 +26,7 @@ impl Fixture {
             other: SigningKey::from_bytes(&[43; 32]),
         }
     }
-    fn nodes(&self, nonce: [u8; 32], profile: TransmissionProfileV2) -> [GenesisNodeV2; 3] {
+    fn nodes(&self, nonce: [u8; 32], profile: TransmissionProfile) -> [GenesisNode; 3] {
         let offer = create_genesis_offer(&self.a, nonce, profile).unwrap();
         let acceptance = accept_genesis_offer(&offer, &self.b, |key| {
             key == self.a.verifying_key().as_bytes()
@@ -42,7 +43,7 @@ impl Fixture {
     }
 }
 
-fn resign(node: &mut GenesisNodeV2, key: &SigningKey) {
+fn resign(node: &mut GenesisNode, key: &SigningKey) {
     let mut bytes = b"TRAX:GENESIS:V2\0".to_vec();
     bytes.extend_from_slice(&encode_deterministic(&node.event).unwrap());
     node.signature = ed25519_sign(key, &bytes);
@@ -62,16 +63,16 @@ fn field_mut<'a>(value: &'a mut Value, name: &str) -> &'a mut Value {
 #[test]
 fn complete_transcript_is_three_linked_signed_nodes_with_one_shared_anchor() {
     let f = Fixture::new();
-    let nodes = f.nodes([5; 32], TransmissionProfileV2::default());
-    assert_eq!(nodes[0].event.step, GenesisStepV2::Offer);
+    let nodes = f.nodes([5; 32], TransmissionProfile::default());
+    assert_eq!(nodes[0].event.step, GenesisStep::Offer);
     assert_eq!(nodes[0].event.previous_tip, [0; 32]);
     assert_eq!(nodes[0].event.responder_public_key, None);
-    assert_eq!(nodes[1].event.step, GenesisStepV2::Accept);
+    assert_eq!(nodes[1].event.step, GenesisStep::Accept);
     assert_eq!(
         nodes[1].event.previous_tip,
         genesis_node_id(&nodes[0]).unwrap()
     );
-    assert_eq!(nodes[2].event.step, GenesisStepV2::Confirm);
+    assert_eq!(nodes[2].event.step, GenesisStep::Confirm);
     assert_eq!(
         nodes[2].event.previous_tip,
         genesis_node_id(&nodes[1]).unwrap()
@@ -80,9 +81,9 @@ fn complete_transcript_is_three_linked_signed_nodes_with_one_shared_anchor() {
         assert_eq!(node.signature.len(), 64);
         assert_eq!(node.event.nonce, [5; 32]);
     }
-    let left = VerifiedGenesisV2::verify(nodes.clone(), |key| f.trusted(key)).unwrap();
+    let left = VerifiedGenesis::verify(nodes.clone(), |key| f.trusted(key)).unwrap();
     let mut called = Vec::new();
-    let right = VerifiedGenesisV2::verify(nodes.clone(), |key| {
+    let right = VerifiedGenesis::verify(nodes.clone(), |key| {
         called.push(*key);
         f.trusted(key)
     })
@@ -98,11 +99,11 @@ fn complete_transcript_is_three_linked_signed_nodes_with_one_shared_anchor() {
     assert_eq!(left.nodes(), &nodes);
     assert_eq!(left.initiator_key(), f.a.verifying_key().to_bytes());
     assert_eq!(left.responder_key(), f.b.verifying_key().to_bytes());
-    assert_eq!(left.profile(), &TransmissionProfileV2::default());
+    assert_eq!(left.profile(), &TransmissionProfile::default());
     let encoded = encode_deterministic(&nodes).unwrap();
     assert_eq!(
         left.anchor(),
-        hash_v2(
+        hash_domain(
             HashAlgorithm::Sha512256,
             b"TRAX:GENESIS:ANCHOR:V2\0",
             &[&encoded]
@@ -112,7 +113,7 @@ fn complete_transcript_is_three_linked_signed_nodes_with_one_shared_anchor() {
     for node in &nodes {
         assert_eq!(
             genesis_node_id(node).unwrap(),
-            hash_v2(
+            hash_domain(
                 HashAlgorithm::Sha512256,
                 b"TRAX:GENESIS:NODE:V2\0",
                 &[&encode_deterministic(node).unwrap()]
@@ -125,26 +126,26 @@ fn complete_transcript_is_three_linked_signed_nodes_with_one_shared_anchor() {
 #[test]
 fn trust_policy_is_explicit_at_accept_confirmation_and_final_verification() {
     let f = Fixture::new();
-    let nodes = f.nodes([6; 32], TransmissionProfileV2::default());
+    let nodes = f.nodes([6; 32], TransmissionProfile::default());
     assert!(accept_genesis_offer(&nodes[0], &f.b, |_| false).is_err());
     assert!(confirm_genesis(&nodes[0], &nodes[1], &f.a, |_| false).is_err());
-    assert!(VerifiedGenesisV2::verify(nodes.clone(), |_| false).is_err());
+    assert!(VerifiedGenesis::verify(nodes.clone(), |_| false).is_err());
     assert!(
-        VerifiedGenesisV2::verify(nodes.clone(), |key| key != f.b.verifying_key().as_bytes())
+        VerifiedGenesis::verify(nodes.clone(), |key| key != f.b.verifying_key().as_bytes())
             .is_err()
     );
-    assert!(VerifiedGenesisV2::verify(nodes, |key| key != f.a.verifying_key().as_bytes()).is_err());
+    assert!(VerifiedGenesis::verify(nodes, |key| key != f.a.verifying_key().as_bytes()).is_err());
 }
 
 #[test]
 fn malformed_transcript_never_reaches_the_trust_callback() {
     let f = Fixture::new();
-    let nodes = f.nodes([7; 32], TransmissionProfileV2::default());
+    let nodes = f.nodes([7; 32], TransmissionProfile::default());
     for index in 0..3 {
         let mut malformed = nodes.clone();
         malformed[index].signature[0] ^= 1;
         let mut calls = 0;
-        assert!(VerifiedGenesisV2::verify(malformed, |_| {
+        assert!(VerifiedGenesis::verify(malformed, |_| {
             calls += 1;
             true
         })
@@ -165,16 +166,16 @@ fn malformed_transcript_never_reaches_the_trust_callback() {
 #[test]
 fn signatures_are_required_for_each_original_signer_and_have_exact_length() {
     let f = Fixture::new();
-    let nodes = f.nodes([8; 32], TransmissionProfileV2::default());
+    let nodes = f.nodes([8; 32], TransmissionProfile::default());
     assert!(confirm_genesis(&nodes[0], &nodes[1], &f.b, |_| true).is_err());
     for index in 0..3 {
         let mut forged = nodes.clone();
         resign(&mut forged[index], &f.other);
-        assert!(VerifiedGenesisV2::verify(forged, |_| true).is_err());
+        assert!(VerifiedGenesis::verify(forged, |_| true).is_err());
         for length in [0, 32, 63, 65] {
             let mut malformed = nodes.clone();
             malformed[index].signature.resize(length, 0);
-            assert!(VerifiedGenesisV2::verify(malformed, |_| true).is_err());
+            assert!(VerifiedGenesis::verify(malformed, |_| true).is_err());
         }
     }
 }
@@ -182,7 +183,7 @@ fn signatures_are_required_for_each_original_signer_and_have_exact_length() {
 #[test]
 fn signed_link_nonce_step_and_profile_substitutions_are_rejected() {
     let f = Fixture::new();
-    let nodes = f.nodes([9; 32], TransmissionProfileV2::default());
+    let nodes = f.nodes([9; 32], TransmissionProfile::default());
     let mut acceptance = nodes[1].clone();
     acceptance.event.previous_tip[0] ^= 1;
     resign(&mut acceptance, &f.b);
@@ -198,25 +199,25 @@ fn signed_link_nonce_step_and_profile_substitutions_are_rejected() {
     let mut malformed = nodes.clone();
     malformed[2].event.previous_tip[0] ^= 1;
     resign(&mut malformed[2], &f.a);
-    assert!(VerifiedGenesisV2::verify(malformed, |_| true).is_err());
+    assert!(VerifiedGenesis::verify(malformed, |_| true).is_err());
     let mut reordered = nodes.clone();
     reordered.swap(0, 1);
-    assert!(VerifiedGenesisV2::verify(reordered, |_| true).is_err());
+    assert!(VerifiedGenesis::verify(reordered, |_| true).is_err());
     let duplicated = [nodes[0].clone(), nodes[1].clone(), nodes[1].clone()];
-    assert!(VerifiedGenesisV2::verify(duplicated, |_| true).is_err());
+    assert!(VerifiedGenesis::verify(duplicated, |_| true).is_err());
 }
 
 #[test]
 fn advertised_self_signed_replacement_is_not_implicitly_trusted() {
     let f = Fixture::new();
-    let offer = create_genesis_offer(&f.a, [10; 32], TransmissionProfileV2::default()).unwrap();
+    let offer = create_genesis_offer(&f.a, [10; 32], TransmissionProfile::default()).unwrap();
     let other_acceptance = accept_genesis_offer(&offer, &f.other, |_| true).unwrap();
     assert!(confirm_genesis(&offer, &other_acceptance, &f.a, |key| key
         == f.b.verifying_key().as_bytes())
     .is_err());
     let confirmation = confirm_genesis(&offer, &other_acceptance, &f.a, |_| true).unwrap();
     assert!(
-        VerifiedGenesisV2::verify([offer.clone(), other_acceptance, confirmation], |key| f
+        VerifiedGenesis::verify([offer.clone(), other_acceptance, confirmation], |key| f
             .trusted(key))
         .is_err()
     );
@@ -227,15 +228,15 @@ fn advertised_self_signed_replacement_is_not_implicitly_trusted() {
 }
 
 #[test]
-fn profile_and_event_versions_cannot_cross_into_the_v2_trust_token() {
+fn unsupported_profile_and_event_schemas_cannot_create_a_trust_token() {
     let f = Fixture::new();
-    let bad_profile = TransmissionProfileV2 {
+    let bad_profile = TransmissionProfile {
         version: 1,
-        ..TransmissionProfileV2::default()
+        ..TransmissionProfile::default()
     };
     assert!(create_genesis_offer(&f.a, [11; 32], bad_profile).is_err());
-    let nodes = f.nodes([11; 32], TransmissionProfileV2::default());
-    for step in [GenesisStepV2::Accept, GenesisStepV2::Confirm] {
+    let nodes = f.nodes([11; 32], TransmissionProfile::default());
+    for step in [GenesisStep::Accept, GenesisStep::Confirm] {
         let mut wrong = nodes[0].clone();
         wrong.event.step = step;
         resign(&mut wrong, &f.a);
@@ -254,83 +255,83 @@ fn profile_and_event_versions_cannot_cross_into_the_v2_trust_token() {
 #[test]
 fn genesis_nonce_and_full_profile_are_bound_into_the_three_record_anchor() {
     let f = Fixture::new();
-    let profile = TransmissionProfileV2::default();
+    let profile = TransmissionProfile::default();
     let base = f.nodes([12; 32], profile.clone());
     assert_eq!(base, f.nodes([12; 32], profile.clone()));
-    let base = VerifiedGenesisV2::verify(base, |_| true).unwrap();
-    let nonce = VerifiedGenesisV2::verify(f.nodes([13; 32], profile.clone()), |_| true).unwrap();
+    let base = VerifiedGenesis::verify(base, |_| true).unwrap();
+    let nonce = VerifiedGenesis::verify(f.nodes([13; 32], profile.clone()), |_| true).unwrap();
     let mut changed = profile;
     changed.limits.max_packets -= 1;
-    let limits = VerifiedGenesisV2::verify(f.nodes([12; 32], changed), |_| true).unwrap();
+    let limits = VerifiedGenesis::verify(f.nodes([12; 32], changed), |_| true).unwrap();
     assert_ne!(base.anchor(), nonce.anchor());
     assert_ne!(base.anchor(), limits.anchor());
 }
 
 #[test]
 fn resource_limits_are_positive_bounded_and_do_not_select_a_k() {
-    let limits = TransmissionLimitsV2::default();
+    let limits = TransmissionLimits::default();
     limits.validate().unwrap();
     let cases = [
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             max_packets: 0,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
-            max_packets: MAX_TRANSMISSION_PACKETS_V2 + 1,
+        TransmissionLimits {
+            max_packets: MAX_TRANSMISSION_PACKETS + 1,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             max_payload_bytes: 0,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
-            max_payload_bytes: MAX_TRANSMISSION_PAYLOAD_BYTES_V2 + 1,
+        TransmissionLimits {
+            max_payload_bytes: MAX_TRANSMISSION_PAYLOAD_BYTES + 1,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             max_packet_payload_bytes: 0,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             max_wire_packet_bytes: 0,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
-            max_wire_packet_bytes: MAX_WIRE_PACKET_BYTES_V2 + 1,
+        TransmissionLimits {
+            max_wire_packet_bytes: MAX_WIRE_PACKET_BYTES + 1,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             timeout_ms: 0,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
-            timeout_ms: MAX_TRANSMISSION_TIMEOUT_MS_V2 + 1,
+        TransmissionLimits {
+            timeout_ms: MAX_TRANSMISSION_TIMEOUT_MS + 1,
             ..limits.clone()
         },
-        TransmissionLimitsV2 {
+        TransmissionLimits {
             max_packet_payload_bytes: limits.max_wire_packet_bytes + 1,
             ..limits.clone()
         },
     ];
     for limits in cases {
         assert!(limits.validate().is_err());
-        assert!(TransmissionProfileV2 {
+        assert!(TransmissionProfile {
             limits,
-            ..TransmissionProfileV2::default()
+            ..TransmissionProfile::default()
         }
         .validate()
         .is_err());
     }
-    TransmissionLimitsV2 {
-        max_packets: MAX_TRANSMISSION_PACKETS_V2,
-        max_payload_bytes: MAX_TRANSMISSION_PAYLOAD_BYTES_V2,
-        max_packet_payload_bytes: MAX_WIRE_PACKET_BYTES_V2,
-        max_wire_packet_bytes: MAX_WIRE_PACKET_BYTES_V2,
-        timeout_ms: MAX_TRANSMISSION_TIMEOUT_MS_V2,
+    TransmissionLimits {
+        max_packets: MAX_TRANSMISSION_PACKETS,
+        max_payload_bytes: MAX_TRANSMISSION_PAYLOAD_BYTES,
+        max_packet_payload_bytes: MAX_WIRE_PACKET_BYTES,
+        max_wire_packet_bytes: MAX_WIRE_PACKET_BYTES,
+        timeout_ms: MAX_TRANSMISSION_TIMEOUT_MS,
     }
     .validate()
     .unwrap();
-    let profile = Value::serialized(&TransmissionProfileV2::default()).unwrap();
+    let profile = Value::serialized(&TransmissionProfile::default()).unwrap();
     if let Value::Map(fields) = profile {
         assert!(!fields
             .iter()
@@ -343,14 +344,14 @@ fn resource_limits_are_positive_bounded_and_do_not_select_a_k() {
 #[test]
 fn fixed_fields_use_exact_byte_strings_and_strict_bounded_typed_decoding() {
     let f = Fixture::new();
-    let nodes = f.nodes([14; 32], TransmissionProfileV2::default());
+    let nodes = f.nodes([14; 32], TransmissionProfile::default());
     for node in &nodes {
         let bytes = encode_deterministic(node).unwrap();
         assert_eq!(
-            decode_strict::<GenesisNodeV2>(&bytes, bytes.len()).unwrap(),
+            decode_strict::<GenesisNode>(&bytes, bytes.len()).unwrap(),
             *node
         );
-        assert!(decode_strict::<GenesisNodeV2>(&bytes, bytes.len() - 1).is_err());
+        assert!(decode_strict::<GenesisNode>(&bytes, bytes.len() - 1).is_err());
         let mut value = Value::serialized(node).unwrap();
         assert!(
             matches!(field_mut(&mut value, "signature"), Value::Bytes(bytes) if bytes.len() == 64)
@@ -368,41 +369,41 @@ fn fixed_fields_use_exact_byte_strings_and_strict_bounded_typed_decoding() {
         let mut value = Value::serialized(&nodes[0]).unwrap();
         *field_mut(field_mut(&mut value, "event"), "nonce") = replacement;
         let bytes = encode_deterministic(&value).unwrap();
-        assert!(decode_strict::<GenesisNodeV2>(&bytes, 4096).is_err());
+        assert!(decode_strict::<GenesisNode>(&bytes, 4096).is_err());
     }
     let mut value = Value::serialized(&nodes[1]).unwrap();
     *field_mut(field_mut(&mut value, "event"), "responder_public_key") = Value::Bytes(vec![0; 31]);
-    assert!(decode_strict::<GenesisNodeV2>(&encode_deterministic(&value).unwrap(), 4096).is_err());
+    assert!(decode_strict::<GenesisNode>(&encode_deterministic(&value).unwrap(), 4096).is_err());
     let mut value = Value::serialized(&nodes[0]).unwrap();
     if let Value::Map(fields) = &mut value {
         fields.push((Value::Text("ignored".into()), Value::Bool(true)));
     }
-    assert!(decode_strict::<GenesisNodeV2>(&encode_deterministic(&value).unwrap(), 4096).is_err());
+    assert!(decode_strict::<GenesisNode>(&encode_deterministic(&value).unwrap(), 4096).is_err());
     let mut value = Value::serialized(&nodes[0]).unwrap();
     let profile = field_mut(field_mut(&mut value, "event"), "profile");
     if let Value::Map(fields) = profile {
         fields.push((Value::Text("k".into()), Value::Integer(8.into())));
     }
-    assert!(decode_strict::<GenesisNodeV2>(&encode_deterministic(&value).unwrap(), 4096).is_err());
+    assert!(decode_strict::<GenesisNode>(&encode_deterministic(&value).unwrap(), 4096).is_err());
     let mut bytes = encode_deterministic(&nodes[0]).unwrap();
     bytes.push(0);
-    assert!(decode_strict::<GenesisNodeV2>(&bytes, 4096).is_err());
+    assert!(decode_strict::<GenesisNode>(&bytes, 4096).is_err());
 }
 
 #[test]
-fn hash_selection_is_explicit_and_does_not_fall_back_to_legacy_compile_time_hash() {
+fn hash_selection_is_explicit_and_never_falls_back() {
     let f = Fixture::new();
-    let profile = TransmissionProfileV2 {
+    let profile = TransmissionProfile {
         hash_algorithm: HashAlgorithm::Blake3,
-        ..TransmissionProfileV2::default()
+        ..TransmissionProfile::default()
     };
     #[cfg(feature = "hash-blake3")]
     {
         let nodes = f.nodes([15; 32], profile);
-        let token = VerifiedGenesisV2::verify(nodes.clone(), |_| true).unwrap();
+        let token = VerifiedGenesis::verify(nodes.clone(), |_| true).unwrap();
         assert_eq!(
             token.anchor(),
-            hash_v2(
+            hash_domain(
                 HashAlgorithm::Blake3,
                 b"TRAX:GENESIS:ANCHOR:V2\0",
                 &[&encode_deterministic(&nodes).unwrap()]
@@ -410,10 +411,8 @@ fn hash_selection_is_explicit_and_does_not_fall_back_to_legacy_compile_time_hash
             .unwrap()
         );
         let sha =
-            VerifiedGenesisV2::verify(f.nodes([15; 32], TransmissionProfileV2::default()), |_| {
-                true
-            })
-            .unwrap();
+            VerifiedGenesis::verify(f.nodes([15; 32], TransmissionProfile::default()), |_| true)
+                .unwrap();
         assert_ne!(token.anchor(), sha.anchor());
     }
     #[cfg(not(feature = "hash-blake3"))]
@@ -424,21 +423,44 @@ fn hash_selection_is_explicit_and_does_not_fall_back_to_legacy_compile_time_hash
 }
 
 #[test]
-fn legacy_packet_zero_signature_cannot_replace_v2_genesis_authorization() {
+fn signature_domain_substitution_is_rejected() {
     let f = Fixture::new();
-    let bytes = trax::admission::create_admission_envelope_v1(
-        &f.a,
-        f.b.verifying_key().as_bytes(),
-        &[1; 32],
-        &[2; 16],
-        b"payload",
-        "packet0.admission",
-        &[],
-        "direct-ed25519",
-    )
-    .unwrap();
-    let legacy = trax::admission::decode_admission_envelope_v1(&bytes).unwrap();
-    let mut offer = create_genesis_offer(&f.a, [16; 32], TransmissionProfileV2::default()).unwrap();
-    offer.signature = legacy.signature;
+    let mut offer = create_genesis_offer(&f.a, [16; 32], TransmissionProfile::default()).unwrap();
+    let mut bytes = b"TRAX:OTHER:SCHEMA\0".to_vec();
+    bytes.extend_from_slice(&encode_deterministic(&offer.event).unwrap());
+    offer.signature = ed25519_sign(&f.a, &bytes);
     assert!(accept_genesis_offer(&offer, &f.b, |_| true).is_err());
+}
+
+#[test]
+fn permanent_names_preserve_the_original_genesis_transcript_bytes() {
+    // The retired standalone-session fixture remains rejection data for the
+    // deliberate session-schema cutover. Its unchanged genesis is independently
+    // useful evidence that naming/moving the shared primitives changed no bytes.
+    let fixture: Value =
+        decode_strict(include_bytes!("fixtures/standalone_session.cbor"), 65_536).unwrap();
+    let frozen = fixture
+        .as_map()
+        .unwrap()
+        .iter()
+        .find(|(key, _)| key.as_text() == Some("genesis"))
+        .unwrap()
+        .1
+        .clone();
+    let frozen_nodes: [GenesisNode; 3] = frozen.deserialized().unwrap();
+    let a = SigningKey::from_bytes(&[1; 32]);
+    let b = SigningKey::from_bytes(&[2; 32]);
+    let offer = create_genesis_offer(&a, [3; 32], TransmissionProfile::default()).unwrap();
+    let acceptance = accept_genesis_offer(&offer, &b, |_| true).unwrap();
+    let confirmation = confirm_genesis(&offer, &acceptance, &a, |_| true).unwrap();
+    let nodes = [offer, acceptance, confirmation];
+    assert_eq!(nodes, frozen_nodes);
+    assert_eq!(
+        encode_deterministic(&nodes).unwrap(),
+        encode_deterministic(&frozen).unwrap()
+    );
+    VerifiedGenesis::verify(nodes, |key| {
+        *key == a.verifying_key().to_bytes() || *key == b.verifying_key().to_bytes()
+    })
+    .unwrap();
 }

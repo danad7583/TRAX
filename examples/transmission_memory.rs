@@ -2,11 +2,9 @@
 use ed25519_dalek::SigningKey;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use trax::genesis::{
-    accept_genesis_offer, confirm_genesis, create_genesis_offer, TransmissionProfileV2,
-    VerifiedGenesisV2,
-};
-use trax::transmission::SessionV2;
+use trax::config::TransmissionProfile;
+use trax::genesis::{accept_genesis_offer, confirm_genesis, create_genesis_offer, VerifiedGenesis};
+use trax::session::Relationship;
 
 struct Counted;
 static LIVE: AtomicUsize = AtomicUsize::new(0);
@@ -59,14 +57,15 @@ fn main() {
         let peer = SigningKey::from_bytes(&[62; 32]);
         let a = key.verifying_key().to_bytes();
         let b = peer.verifying_key().to_bytes();
-        let offer = create_genesis_offer(&key, [63; 32], TransmissionProfileV2::default()).unwrap();
+        let offer = create_genesis_offer(&key, [63; 32], TransmissionProfile::default()).unwrap();
         let acceptance = accept_genesis_offer(&offer, &peer, |k| k == &a).unwrap();
         let confirmation = confirm_genesis(&offer, &acceptance, &key, |k| k == &b).unwrap();
         let genesis =
-            VerifiedGenesisV2::verify([offer, acceptance, confirmation], |k| k == &a || k == &b)
+            VerifiedGenesis::verify([offer, acceptance, confirmation], |k| k == &a || k == &b)
                 .unwrap();
-        let sender = SessionV2::new(genesis.clone(), a, [64; 32]).unwrap();
-        let mut receiver = SessionV2::new(genesis, a, [64; 32]).unwrap();
+        let mut sender = Relationship::new(genesis.clone()).unwrap();
+        sender.begin_session(a, [64; 32]).unwrap();
+        let mut receiver = Relationship::new(genesis).unwrap();
         let baseline = LIVE.load(Ordering::Relaxed);
         PEAK.store(baseline, Ordering::Relaxed);
         let chunks = vec![vec![42; 1024]; count];

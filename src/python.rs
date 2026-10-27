@@ -1,150 +1,32 @@
+//! Memory-only Python relationships backed by the canonical Rust trust state.
 #![allow(clippy::too_many_arguments, clippy::useless_conversion)]
 
+use ciborium::value::Value;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use serde::Serialize;
 
-const ED25519_PUBLIC_KEY_LEN: usize = 32;
-const ED25519_SIGNATURE_LEN: usize = 64;
-const NONCE_LEN: usize = 16;
-const HASH32_LEN: usize = 32;
+use crate::config::{HashAlgorithm, TransmissionLimits, TransmissionProfile};
+use crate::encoding::{decode_strict, encode_deterministic};
+use crate::genesis::{
+    accept_genesis_offer as accept_offer, confirm_genesis as confirm_offer,
+    create_genesis_offer as create_offer, GenesisNode, VerifiedGenesis,
+};
+use crate::session::Relationship as CoreRelationship;
+use crate::TraxError;
 
-#[pyclass(module = "trax")]
-pub(crate) struct PrivateKey {
-    pub(crate) signing_key: ed25519_dalek::SigningKey,
-}
-
-#[pyclass(module = "trax")]
-struct LocalDag {
-    inner: crate::admission_dag::LocalAdmissionDag,
-}
+const MAX_GENESIS_BYTES: usize = 16 * 1024;
 
 #[pyclass(module = "trax")]
-struct TrustedSessionContext {
-    inner: crate::dag::TrustedSessionContext,
-}
-
-#[pyclass(module = "trax")]
-struct ReceiveAdmissionWindow {
-    inner: crate::dag::ReceiveAdmissionWindow,
-}
-
-#[pymethods]
-impl ReceiveAdmissionWindow {
-    #[new]
-    fn new(context: PyRef<'_, TrustedSessionContext>) -> PyResult<Self> {
-        Ok(Self {
-            inner: crate::dag::ReceiveAdmissionWindow::new(context.inner.clone())
-                .map_err(trax_error)?,
-        })
-    }
-
-    fn stage<'py>(
-        &mut self,
-        py: Python<'py>,
-        event: &[u8],
-        payload: &[u8],
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        let event = crate::encoding::decode(event).map_err(trax_error)?;
-        let tip = self
-            .inner
-            .stage_with_payload(event, payload)
-            .map_err(trax_error)?;
-        Ok(PyBytes::new_bound(py, &tip))
-    }
-
-    fn verify_and_commit<'py>(
-        &mut self,
-        py: Python<'py>,
-        seal: &[u8],
-    ) -> PyResult<Bound<'py, PyList>> {
-        let seal = crate::encoding::decode(seal).map_err(trax_error)?;
-        let encoded = self
-            .inner
-            .verify_and_commit(&seal)
-            .map_err(trax_error)?
-            .iter()
-            .map(crate::encoding::encode_deterministic)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(trax_error)?;
-        let result = PyList::empty_bound(py);
-        for event in encoded {
-            result.append(PyBytes::new_bound(py, &event))?;
-        }
-        Ok(result)
-    }
-
-    fn provisional_count(&self) -> usize {
-        self.inner.provisional_count()
-    }
-    fn committed_count(&self) -> u64 {
-        self.inner.committed_count()
-    }
-    fn committed_tip<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.committed_tip())
-    }
-    fn provisional_tip<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.provisional_tip())
-    }
-}
-
-#[pymethods]
-impl TrustedSessionContext {
-    #[staticmethod]
-    #[pyo3(signature = (session_id, receiver_id, lineage_public_key, committed_tip, segment_index=0, next_counter=0, *, k))]
-    fn from_verified_state(
-        session_id: &[u8],
-        receiver_id: &[u8],
-        lineage_public_key: &[u8],
-        committed_tip: &[u8],
-        segment_index: u64,
-        next_counter: u64,
-        k: usize,
-    ) -> PyResult<Self> {
-        let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
-        let key = parse_verifying_key("lineage_public_key", lineage_public_key)?;
-        validate_len("session_id", session_id, HASH32_LEN)?;
-        validate_len("receiver_id", receiver_id, HASH32_LEN)?;
-        validate_len("committed_tip", committed_tip, HASH32_LEN)?;
-        Ok(Self {
-            inner: crate::dag::TrustedSessionContext::from_verified_state(
-                config,
-                session_id.try_into().unwrap(),
-                receiver_id.try_into().unwrap(),
-                key,
-                committed_tip.try_into().unwrap(),
-                segment_index,
-                next_counter,
-            ),
-        })
-    }
-
-    fn session_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.session_id())
-    }
-    fn receiver_id<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.receiver_id())
-    }
-    fn committed_tip<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        PyBytes::new_bound(py, &self.inner.committed_tip())
-    }
-    fn segment_index(&self) -> u64 {
-        self.inner.segment_index()
-    }
-    fn next_counter(&self) -> u64 {
-        self.inner.next_counter()
-    }
-
-    fn k(&self) -> usize {
-        self.inner.config().k()
-    }
+struct PrivateKey {
+    signing_key: ed25519_dalek::SigningKey,
 }
 
 #[pymethods]
 impl PrivateKey {
     fn public_key<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let verifying_key = self.signing_key.verifying_key();
-        PyBytes::new_bound(py, verifying_key.as_bytes())
+        PyBytes::new_bound(py, self.signing_key.verifying_key().as_bytes())
     }
 
     fn __repr__(&self) -> &'static str {
@@ -152,394 +34,362 @@ impl PrivateKey {
     }
 }
 
-#[pymethods]
-impl LocalDag {
-    #[new]
-    fn new(k: usize) -> PyResult<Self> {
-        let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
-        Ok(Self {
-            inner: crate::admission_dag::LocalAdmissionDag::new(config),
-        })
-    }
+fn error(err: TraxError) -> PyErr {
+    PyValueError::new_err(err.to_string())
+}
 
-    fn admit_packet0<'py>(
-        &mut self,
-        py: Python<'py>,
-        envelope: &[u8],
-        payload: &[u8],
-        receiver_public_key: &[u8],
-    ) -> PyResult<Bound<'py, PyBytes>> {
-        let node_id = self
-            .inner
-            .admit_packet0(envelope, payload, receiver_public_key)
-            .map_err(trax_error)?;
-        Ok(PyBytes::new_bound(py, &node_id))
-    }
+fn fixed32(name: &str, bytes: &[u8]) -> PyResult<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| PyValueError::new_err(format!("{name} must be 32 bytes")))
+}
 
-    fn trusted_context_from_latest_packet0(&self) -> PyResult<TrustedSessionContext> {
-        Ok(TrustedSessionContext {
-            inner: self
-                .inner
-                .trusted_context_from_latest_packet0()
-                .map_err(trax_error)?,
-        })
-    }
+fn genesis(bytes: &[u8]) -> PyResult<GenesisNode> {
+    decode_strict(bytes, MAX_GENESIS_BYTES).map_err(error)
+}
 
-    fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    fn __len__(&self) -> usize {
-        self.len()
-    }
-
-    fn __repr__(&self) -> String {
-        format!("<trax.LocalDag len={}>", self.len())
+fn value_to_python(py: Python<'_>, value: Value) -> PyResult<PyObject> {
+    match value {
+        Value::Null => Ok(py.None()),
+        Value::Bool(value) => Ok(value.into_py(py)),
+        Value::Integer(value) => Ok(i128::from(value).into_py(py)),
+        Value::Text(value) => Ok(value.into_py(py)),
+        Value::Bytes(value) => Ok(PyBytes::new_bound(py, &value).into_any().unbind()),
+        Value::Array(values) => {
+            let list = PyList::empty_bound(py);
+            for value in values {
+                list.append(value_to_python(py, value)?)?;
+            }
+            Ok(list.into_any().unbind())
+        }
+        Value::Map(fields) => {
+            let dict = PyDict::new_bound(py);
+            for (key, value) in fields {
+                let Value::Text(key) = key else {
+                    return Err(PyValueError::new_err(
+                        "inspection record has a non-text key",
+                    ));
+                };
+                dict.set_item(key, value_to_python(py, value)?)?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+        _ => Err(PyValueError::new_err("unsupported inspection value")),
     }
 }
 
-#[pyfunction]
-fn hash32<'py>(py: Python<'py>, data: &[u8]) -> Bound<'py, PyBytes> {
-    let digest = crate::crypto::hash32(data);
-    PyBytes::new_bound(py, &digest)
+fn inspect(py: Python<'_>, value: &impl Serialize) -> PyResult<PyObject> {
+    let value = Value::serialized(value)
+        .map_err(|_| PyValueError::new_err("inspection encoding failed"))?;
+    value_to_python(py, value)
 }
 
-#[pyfunction]
-fn receiver_id<'py>(
+fn records<'py, T: Serialize>(
     py: Python<'py>,
-    receiver_lineage_public_key: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    let key = parse_verifying_key("receiver_lineage_public_key", receiver_lineage_public_key)?;
-    Ok(PyBytes::new_bound(py, &crate::dag::receiver_id(&key)))
-}
-
-#[pyfunction]
-#[pyo3(signature = (session_id, lineage_public_key, receiver_id, segment_index, counter, previous_tip, content_hash, payload_hash))]
-fn create_post_genesis_event_v1<'py>(
-    py: Python<'py>,
-    session_id: &[u8],
-    lineage_public_key: &[u8],
-    receiver_id: &[u8],
-    segment_index: u64,
-    counter: u64,
-    previous_tip: &[u8],
-    content_hash: &[u8],
-    payload_hash: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    use ed25519_dalek::VerifyingKey;
-    for (name, value) in [
-        ("session_id", session_id),
-        ("receiver_id", receiver_id),
-        ("previous_tip", previous_tip),
-        ("content_hash", content_hash),
-        ("payload_hash", payload_hash),
-    ] {
-        validate_len(name, value, HASH32_LEN)?;
+    values: impl IntoIterator<Item = T>,
+) -> PyResult<Bound<'py, PyList>> {
+    let result = PyList::empty_bound(py);
+    for value in values {
+        let bytes = encode_deterministic(&value).map_err(error)?;
+        result.append(PyBytes::new_bound(py, &bytes))?;
     }
-    validate_len(
-        "lineage_public_key",
-        lineage_public_key,
-        ED25519_PUBLIC_KEY_LEN,
-    )?;
-    let key = VerifyingKey::from_bytes(&lineage_public_key.try_into().unwrap())
-        .map_err(|_| PyValueError::new_err("invalid lineage public key"))?;
-    let event = crate::PostGenesisEventV1 {
-        version: 1,
-        session_id: session_id.try_into().unwrap(),
-        lineage_key_id: crate::dag::lineage_key_id(&key),
-        receiver_id: receiver_id.try_into().unwrap(),
-        segment_index,
-        counter,
-        previous_tip: previous_tip.try_into().unwrap(),
-        content_hash: content_hash.try_into().unwrap(),
-        payload_hash: payload_hash.try_into().unwrap(),
-    };
-    let bytes = crate::encoding::encode_deterministic(&event).map_err(trax_error)?;
-    Ok(PyBytes::new_bound(py, &bytes))
-}
-
-#[pyfunction]
-fn create_segment_seal<'py>(
-    py: Python<'py>,
-    private_key: PyRef<'py, PrivateKey>,
-    events: Vec<Vec<u8>>,
-    k: usize,
-) -> PyResult<Bound<'py, PyBytes>> {
-    let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
-    let events = events
-        .iter()
-        .map(|e| crate::encoding::decode(e))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(trax_error)?;
-    let seal = crate::dag::create_segment_seal(config, &private_key.signing_key, &events)
-        .map_err(trax_error)?;
-    let bytes = crate::encoding::encode_deterministic(&seal).map_err(trax_error)?;
-    Ok(PyBytes::new_bound(py, &bytes))
-}
-
-#[pyfunction]
-fn verify_segment_seal_intrinsic(
-    lineage_public_key: &[u8],
-    events: Vec<Vec<u8>>,
-    seal: &[u8],
-    k: usize,
-) -> PyResult<bool> {
-    let config = crate::SegmentConfig::new(k).map_err(trax_error)?;
-    use ed25519_dalek::VerifyingKey;
-    validate_len(
-        "lineage_public_key",
-        lineage_public_key,
-        ED25519_PUBLIC_KEY_LEN,
-    )?;
-    let key = VerifyingKey::from_bytes(&lineage_public_key.try_into().unwrap())
-        .map_err(|_| PyValueError::new_err("invalid lineage public key"))?;
-    let events = events
-        .iter()
-        .map(|e| crate::encoding::decode(e))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(trax_error)?;
-    let seal = crate::encoding::decode(seal).map_err(trax_error)?;
-    Ok(crate::dag::verify_segment_proof_intrinsic(
-        config,
-        &crate::SegmentProof { events, seal },
-        &key,
-    )
-    .is_ok())
-}
-
-#[pyfunction]
-fn verify_segment_seal_for_context(
-    context: PyRef<'_, TrustedSessionContext>,
-    events: Vec<Vec<u8>>,
-    seal: &[u8],
-) -> PyResult<bool> {
-    let events = events
-        .iter()
-        .map(|e| crate::encoding::decode(e))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(trax_error)?;
-    let seal = crate::encoding::decode(seal).map_err(trax_error)?;
-    Ok(crate::dag::verify_segment_proof_for_context(
-        &crate::SegmentProof { events, seal },
-        &context.inner,
-    )
-    .is_ok())
+    Ok(result)
 }
 
 #[pyfunction]
 fn generate_keypair(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
-    use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
-
-    let mut rng = OsRng;
-    let signing_key = SigningKey::generate(&mut rng);
-    let verifying_key = signing_key.verifying_key();
-
-    let keys = PyDict::new_bound(py);
-    keys.set_item("private_key", Py::new(py, PrivateKey { signing_key })?)?;
-    keys.set_item(
-        "public_key",
-        PyBytes::new_bound(py, verifying_key.as_bytes()),
-    )?;
-    Ok(keys)
+    let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+    let public_key = signing_key.verifying_key();
+    let result = PyDict::new_bound(py);
+    result.set_item("private_key", Py::new(py, PrivateKey { signing_key })?)?;
+    result.set_item("public_key", PyBytes::new_bound(py, public_key.as_bytes()))?;
+    Ok(result)
 }
 
 #[pyfunction]
 fn generate_nonce<'py>(py: Python<'py>) -> Bound<'py, PyBytes> {
-    use rand::rngs::OsRng;
     use rand::RngCore;
-
-    let mut nonce = [0u8; NONCE_LEN];
-    OsRng.fill_bytes(&mut nonce);
+    let mut nonce = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
     PyBytes::new_bound(py, &nonce)
 }
 
-#[pyfunction]
-fn derive_session_id<'py>(
-    py: Python<'py>,
-    transcript_hash: &[u8],
-    client_nonce: &[u8],
-    server_nonce: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    validate_len("transcript_hash", transcript_hash, HASH32_LEN)?;
-    validate_len("client_nonce", client_nonce, NONCE_LEN)?;
-    validate_len("server_nonce", server_nonce, NONCE_LEN)?;
-
-    let session_id =
-        crate::session::derive_session_id(transcript_hash, client_nonce, server_nonce, None);
-    Ok(PyBytes::new_bound(py, &session_id))
-}
-
+/// Generic Ed25519 signing, not an authenticated transmission/admission API.
 #[pyfunction]
 fn sign_message<'py>(
     py: Python<'py>,
-    private_key: PyRef<'py, PrivateKey>,
+    private_key: PyRef<'_, PrivateKey>,
     message: &[u8],
-) -> PyResult<Bound<'py, PyBytes>> {
-    let signature = crate::crypto::ed25519_sign(&private_key.signing_key, message);
-
-    Ok(PyBytes::new_bound(py, &signature))
+) -> Bound<'py, PyBytes> {
+    PyBytes::new_bound(
+        py,
+        &crate::crypto::ed25519_sign(&private_key.signing_key, message),
+    )
 }
 
 #[pyfunction]
 fn verify_message(public_key: &[u8], message: &[u8], signature: &[u8]) -> PyResult<bool> {
-    use ed25519_dalek::VerifyingKey;
-
-    validate_len("public_key", public_key, ED25519_PUBLIC_KEY_LEN)?;
-    validate_len("signature", signature, ED25519_SIGNATURE_LEN)?;
-
-    let public_key: [u8; ED25519_PUBLIC_KEY_LEN] = public_key
-        .try_into()
-        .map_err(|_| PyValueError::new_err("public_key must be 32 bytes"))?;
-    let verifying_key = VerifyingKey::from_bytes(&public_key)
-        .map_err(|_| PyValueError::new_err("public_key is not a valid Ed25519 public key"))?;
-
-    Ok(crate::crypto::ed25519_verify(
-        &verifying_key,
-        message,
-        signature,
-    ))
+    let public_key = fixed32("public_key", public_key)?;
+    if signature.len() != 64 {
+        return Err(PyValueError::new_err("signature must be 64 bytes"));
+    }
+    let key = ed25519_dalek::VerifyingKey::from_bytes(&public_key)
+        .map_err(|_| PyValueError::new_err("invalid public_key"))?;
+    Ok(crate::crypto::ed25519_verify(&key, message, signature))
 }
 
 #[pyfunction]
-#[pyo3(signature = (
-    private_key,
-    receiver_public_key,
-    session_id,
-    nonce,
-    payload,
-    message_type,
-    dag_parent_refs=None,
-    proof_type="none"
-))]
-fn create_admission_envelope_v1<'py>(
+#[pyo3(signature = (private_key, nonce, *, hash_algorithm, max_packets=None, max_payload_bytes=None, max_packet_payload_bytes=None, max_wire_packet_bytes=None, timeout_ms=None))]
+fn create_genesis_offer<'py>(
     py: Python<'py>,
-    private_key: PyRef<'py, PrivateKey>,
-    receiver_public_key: &[u8],
-    session_id: &[u8],
+    private_key: PyRef<'_, PrivateKey>,
     nonce: &[u8],
-    payload: &[u8],
-    message_type: &str,
-    dag_parent_refs: Option<Vec<Vec<u8>>>,
-    proof_type: &str,
+    hash_algorithm: &str,
+    max_packets: Option<u32>,
+    max_payload_bytes: Option<u64>,
+    max_packet_payload_bytes: Option<u32>,
+    max_wire_packet_bytes: Option<u32>,
+    timeout_ms: Option<u64>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let dag_parent_refs = dag_parent_refs.unwrap_or_default();
-    let envelope = crate::admission::create_admission_envelope_v1(
-        &private_key.signing_key,
-        receiver_public_key,
-        session_id,
-        nonce,
-        payload,
-        message_type,
-        &dag_parent_refs,
-        proof_type,
-    )
-    .map_err(trax_error)?;
-
-    Ok(PyBytes::new_bound(py, &envelope))
+    let hash_algorithm = match hash_algorithm {
+        "sha512-256" => HashAlgorithm::Sha512256,
+        "blake3" => HashAlgorithm::Blake3,
+        _ => return Err(PyValueError::new_err("unsupported hash_algorithm")),
+    };
+    let defaults = TransmissionLimits::default();
+    let profile = TransmissionProfile {
+        hash_algorithm,
+        limits: TransmissionLimits {
+            max_packets: max_packets.unwrap_or(defaults.max_packets),
+            max_payload_bytes: max_payload_bytes.unwrap_or(defaults.max_payload_bytes),
+            max_packet_payload_bytes: max_packet_payload_bytes
+                .unwrap_or(defaults.max_packet_payload_bytes),
+            max_wire_packet_bytes: max_wire_packet_bytes.unwrap_or(defaults.max_wire_packet_bytes),
+            timeout_ms: timeout_ms.unwrap_or(defaults.timeout_ms),
+        },
+        ..TransmissionProfile::default()
+    };
+    let offer =
+        create_offer(&private_key.signing_key, fixed32("nonce", nonce)?, profile).map_err(error)?;
+    let bytes = encode_deterministic(&offer).map_err(error)?;
+    Ok(PyBytes::new_bound(py, &bytes))
 }
 
 #[pyfunction]
-fn verify_admission_envelope_v1(envelope: &[u8], payload: &[u8]) -> PyResult<bool> {
-    crate::admission::verify_admission_envelope_v1(envelope, payload).map_err(trax_error)
-}
-
-#[pyfunction]
-fn verify_admission_envelope_v1_for_receiver(
-    envelope: &[u8],
-    payload: &[u8],
-    receiver_public_key: &[u8],
-) -> PyResult<bool> {
-    crate::admission::verify_admission_envelope_v1_for_receiver(
-        envelope,
-        payload,
-        receiver_public_key,
-    )
-    .map_err(trax_error)
-}
-
-#[pyfunction]
-fn decode_admission_envelope_v1<'py>(
+fn accept_genesis_offer<'py>(
     py: Python<'py>,
-    envelope: &[u8],
-) -> PyResult<Bound<'py, PyDict>> {
-    let envelope = crate::admission::decode_admission_envelope_v1(envelope).map_err(trax_error)?;
-    let decoded = PyDict::new_bound(py);
-    decoded.set_item("version", envelope.version)?;
-    decoded.set_item("session_id", PyBytes::new_bound(py, &envelope.session_id))?;
-    decoded.set_item("nonce", PyBytes::new_bound(py, &envelope.nonce))?;
-    decoded.set_item(
-        "sender_public_key",
-        PyBytes::new_bound(py, &envelope.sender_public_key),
-    )?;
-    decoded.set_item(
-        "receiver_public_key",
-        PyBytes::new_bound(py, &envelope.receiver_public_key),
-    )?;
-    decoded.set_item(
-        "payload_hash",
-        PyBytes::new_bound(py, &envelope.payload_hash),
-    )?;
-    decoded.set_item("message_type", envelope.message_type)?;
-    let dag_parent_refs = PyList::empty_bound(py);
-    for parent_ref in envelope.dag_parent_refs {
-        dag_parent_refs.append(PyBytes::new_bound(py, &parent_ref))?;
+    offer: &[u8],
+    private_key: PyRef<'_, PrivateKey>,
+    trusted_peer: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let trusted_peer = fixed32("trusted_peer", trusted_peer)?;
+    let accepted = accept_offer(&genesis(offer)?, &private_key.signing_key, |candidate| {
+        candidate == &trusted_peer
+    })
+    .map_err(error)?;
+    let bytes = encode_deterministic(&accepted).map_err(error)?;
+    Ok(PyBytes::new_bound(py, &bytes))
+}
+
+#[pyfunction]
+fn confirm_genesis<'py>(
+    py: Python<'py>,
+    offer: &[u8],
+    acceptance: &[u8],
+    private_key: PyRef<'_, PrivateKey>,
+    trusted_peer: &[u8],
+) -> PyResult<Bound<'py, PyBytes>> {
+    let trusted_peer = fixed32("trusted_peer", trusted_peer)?;
+    let confirmation = confirm_offer(
+        &genesis(offer)?,
+        &genesis(acceptance)?,
+        &private_key.signing_key,
+        |candidate| candidate == &trusted_peer,
+    )
+    .map_err(error)?;
+    let bytes = encode_deterministic(&confirmation).map_err(error)?;
+    Ok(PyBytes::new_bound(py, &bytes))
+}
+
+/// Memory-only authoritative relationship; no unchecked restore or session constructor.
+#[pyclass(module = "trax")]
+struct Relationship {
+    inner: CoreRelationship,
+}
+
+#[pymethods]
+impl Relationship {
+    #[new]
+    fn new(
+        offer: &[u8],
+        acceptance: &[u8],
+        confirmation: &[u8],
+        trusted_keys: Vec<Vec<u8>>,
+    ) -> PyResult<Self> {
+        if trusted_keys.len() != 2 {
+            return Err(PyValueError::new_err(
+                "exactly two trusted_keys are required",
+            ));
+        }
+        let trusted = [
+            fixed32("trusted_keys[0]", &trusted_keys[0])?,
+            fixed32("trusted_keys[1]", &trusted_keys[1])?,
+        ];
+        if trusted[0] == trusted[1] {
+            return Err(PyValueError::new_err("trusted_keys must be distinct"));
+        }
+        let verified = VerifiedGenesis::verify(
+            [
+                genesis(offer)?,
+                genesis(acceptance)?,
+                genesis(confirmation)?,
+            ],
+            |candidate| trusted.contains(candidate),
+        )
+        .map_err(error)?;
+        Ok(Self {
+            inner: CoreRelationship::new(verified).map_err(error)?,
+        })
     }
-    decoded.set_item("dag_parent_refs", dag_parent_refs)?;
-    decoded.set_item("proof_type", envelope.proof_type)?;
-    decoded.set_item("signature", PyBytes::new_bound(py, &envelope.signature))?;
-    Ok(decoded)
-}
 
-fn validate_len(name: &str, value: &[u8], expected: usize) -> PyResult<()> {
-    if value.len() == expected {
-        Ok(())
-    } else {
-        Err(PyValueError::new_err(format!(
-            "{name} must be {expected} bytes, got {}",
-            value.len()
-        )))
+    fn begin_session(&mut self, initiator: &[u8], nonce: &[u8]) -> PyResult<()> {
+        self.inner
+            .begin_session(fixed32("initiator", initiator)?, fixed32("nonce", nonce)?)
+            .map_err(error)
     }
-}
 
-fn parse_verifying_key(name: &str, value: &[u8]) -> PyResult<ed25519_dalek::VerifyingKey> {
-    validate_len(name, value, ED25519_PUBLIC_KEY_LEN)?;
-    ed25519_dalek::VerifyingKey::from_bytes(&value.try_into().unwrap())
-        .map_err(|_| PyValueError::new_err(format!("invalid {name}")))
-}
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<PyObject> {
+        inspect(py, &self.inner.checkpoint())
+    }
 
-fn trax_error(err: crate::TraxError) -> PyErr {
-    PyValueError::new_err(err.to_string())
+    fn session(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let Some(session) = self.inner.session() else {
+            return Ok(None);
+        };
+        let result = PyDict::new_bound(py);
+        result.set_item("context", inspect(py, session.context())?)?;
+        result.set_item("checkpoint", inspect(py, &session.checkpoint())?)?;
+        result.set_item("has_pending", session.has_pending())?;
+        Ok(Some(result.into_any().unbind()))
+    }
+
+    fn history<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        records(py, self.inner.history())
+    }
+
+    fn record<'py>(&self, py: Python<'py>, id: &[u8]) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        self.inner
+            .record(&fixed32("id", id)?)
+            .map(|record| {
+                encode_deterministic(record)
+                    .map(|bytes| PyBytes::new_bound(py, &bytes))
+                    .map_err(error)
+            })
+            .transpose()
+    }
+
+    fn ancestors<'py>(&self, py: Python<'py>, id: &[u8]) -> PyResult<Bound<'py, PyList>> {
+        records(
+            py,
+            self.inner.ancestors(&fixed32("id", id)?).map_err(error)?,
+        )
+    }
+
+    fn children<'py>(&self, py: Python<'py>, id: &[u8]) -> PyResult<Bound<'py, PyList>> {
+        records(py, self.inner.children(&fixed32("id", id)?))
+    }
+
+    fn build_transmission<'py>(
+        &self,
+        py: Python<'py>,
+        private_key: PyRef<'_, PrivateKey>,
+        message_type: &str,
+        chunks: Vec<Vec<u8>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        records(
+            py,
+            self.inner
+                .build_transmission(&private_key.signing_key, message_type, &chunks)
+                .map_err(error)?,
+        )
+    }
+
+    fn fragment_transmission<'py>(
+        &self,
+        py: Python<'py>,
+        private_key: PyRef<'_, PrivateKey>,
+        message_type: &str,
+        payload: &[u8],
+    ) -> PyResult<Bound<'py, PyList>> {
+        records(
+            py,
+            self.inner
+                .fragment_transmission(&private_key.signing_key, message_type, payload)
+                .map_err(error)?,
+        )
+    }
+
+    fn start_receive(&mut self) -> PyResult<()> {
+        self.inner.start_receive().map_err(error)
+    }
+
+    fn stage_packet<'py>(
+        &mut self,
+        py: Python<'py>,
+        packet: &[u8],
+    ) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        self.inner
+            .stage_encoded_packet(packet)
+            .map(|verified| {
+                verified.map(|transmission| PyBytes::new_bound(py, &transmission.payload()))
+            })
+            .map_err(error)
+    }
+
+    fn has_pending(&self) -> bool {
+        self.inner.has_pending()
+    }
+
+    fn abort_receive(&mut self) -> bool {
+        self.inner.abort_receive()
+    }
+
+    fn abort_draft_session(&mut self) -> bool {
+        self.inner.abort_draft_session()
+    }
+
+    fn expire_receive(&mut self) -> bool {
+        self.inner.expire_receive()
+    }
+
+    fn create_close<'py>(
+        &self,
+        py: Python<'py>,
+        private_key: PyRef<'_, PrivateKey>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let terminal = self
+            .inner
+            .create_close(&private_key.signing_key)
+            .map_err(error)?;
+        let bytes = encode_deterministic(&terminal).map_err(error)?;
+        Ok(PyBytes::new_bound(py, &bytes))
+    }
+
+    fn verify_and_close(&mut self, terminal: &[u8]) -> PyResult<()> {
+        self.inner.verify_encoded_close(terminal).map_err(error)
+    }
 }
 
 #[pymodule]
 fn trax(module: &Bound<'_, PyModule>) -> PyResult<()> {
-    crate::python_transmission::register(module)?;
-    module.add_class::<LocalDag>()?;
     module.add_class::<PrivateKey>()?;
-    module.add_class::<TrustedSessionContext>()?;
-    module.add_class::<ReceiveAdmissionWindow>()?;
-    module.add_function(wrap_pyfunction!(create_post_genesis_event_v1, module)?)?;
-    module.add_function(wrap_pyfunction!(create_segment_seal, module)?)?;
-    module.add_function(wrap_pyfunction!(verify_segment_seal_intrinsic, module)?)?;
-    module.add_function(wrap_pyfunction!(verify_segment_seal_for_context, module)?)?;
-    module.add_function(wrap_pyfunction!(receiver_id, module)?)?;
-    module.add_function(wrap_pyfunction!(create_admission_envelope_v1, module)?)?;
-    module.add_function(wrap_pyfunction!(decode_admission_envelope_v1, module)?)?;
-    module.add_function(wrap_pyfunction!(derive_session_id, module)?)?;
+    module.add_class::<Relationship>()?;
     module.add_function(wrap_pyfunction!(generate_keypair, module)?)?;
     module.add_function(wrap_pyfunction!(generate_nonce, module)?)?;
-    module.add_function(wrap_pyfunction!(hash32, module)?)?;
     module.add_function(wrap_pyfunction!(sign_message, module)?)?;
-    module.add_function(wrap_pyfunction!(verify_admission_envelope_v1, module)?)?;
-    module.add_function(wrap_pyfunction!(
-        verify_admission_envelope_v1_for_receiver,
-        module
-    )?)?;
     module.add_function(wrap_pyfunction!(verify_message, module)?)?;
+    module.add_function(wrap_pyfunction!(create_genesis_offer, module)?)?;
+    module.add_function(wrap_pyfunction!(accept_genesis_offer, module)?)?;
+    module.add_function(wrap_pyfunction!(confirm_genesis, module)?)?;
     Ok(())
 }

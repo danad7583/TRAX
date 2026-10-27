@@ -1,17 +1,16 @@
 use ed25519_dalek::SigningKey;
 use trax::crypto::ed25519_sign;
+use trax::crypto::hash_domain;
 use trax::encoding::{decode_strict, encode_deterministic};
 use trax::genesis::{
-    accept_genesis_offer, confirm_genesis, create_genesis_offer, GenesisNodeV2,
-    TransmissionProfileV2, VerifiedGenesisV2,
+    accept_genesis_offer, confirm_genesis, create_genesis_offer, GenesisNode, VerifiedGenesis,
 };
-use trax::transmission::{
-    event_tip_v2, PacketV2, SessionV2, TransmissionCommitmentV2, TransmissionKindV2,
-};
-use trax::transmission_crypto::{hash_v2, MerkleAccumulatorV2};
-use trax::{HashAlgorithm, TraxError};
+use trax::merkle::MerkleAccumulator;
+use trax::session::Relationship;
+use trax::transmission::{event_tip, Packet, TransmissionCommitment, TransmissionKind};
+use trax::{HashAlgorithm, TransmissionProfile, TraxError};
 
-fn transcript(profile: TransmissionProfileV2) -> (SigningKey, SigningKey, [GenesisNodeV2; 3]) {
+fn transcript(profile: TransmissionProfile) -> (SigningKey, SigningKey, [GenesisNode; 3]) {
     let a = SigningKey::from_bytes(&[1; 32]);
     let b = SigningKey::from_bytes(&[2; 32]);
     let offer = create_genesis_offer(&a, [3; 32], profile).unwrap();
@@ -24,16 +23,20 @@ fn transcript(profile: TransmissionProfileV2) -> (SigningKey, SigningKey, [Genes
     (a, b, [offer, accept, confirm])
 }
 
-fn session(nodes: &[GenesisNodeV2; 3], initiator: &SigningKey, nonce: u8) -> SessionV2 {
+fn session(nodes: &[GenesisNode; 3], initiator: &SigningKey, nonce: u8) -> Relationship {
     let trusted = [
         nodes[0].event.initiator_public_key,
         nodes[1].event.responder_public_key.unwrap(),
     ];
-    let genesis = VerifiedGenesisV2::verify(nodes.clone(), |key| trusted.contains(key)).unwrap();
-    SessionV2::new(genesis, initiator.verifying_key().to_bytes(), [nonce; 32]).unwrap()
+    let genesis = VerifiedGenesis::verify(nodes.clone(), |key| trusted.contains(key)).unwrap();
+    let mut relationship = Relationship::new(genesis).unwrap();
+    relationship
+        .begin_session(initiator.verifying_key().to_bytes(), [nonce; 32])
+        .unwrap();
+    relationship
 }
 
-fn admit(session: &mut SessionV2, packets: &[PacketV2]) -> Vec<u8> {
+fn admit(session: &mut Relationship, packets: &[Packet]) -> Vec<u8> {
     let before = session.checkpoint();
     session.start_receive().unwrap();
     let mut released = Vec::new();
@@ -43,7 +46,7 @@ fn admit(session: &mut SessionV2, packets: &[PacketV2]) -> Vec<u8> {
         if index + 1 < packets.len() {
             assert!(verified.is_none());
             assert_eq!(session.checkpoint(), before);
-            assert_eq!(session.nodes().len() as u64, before.event_count);
+            assert_eq!(session.history().len() as u64, before.record_count + 1);
         } else {
             let verified = verified.unwrap();
             assert_eq!(verified.packets(), packets);
@@ -55,7 +58,7 @@ fn admit(session: &mut SessionV2, packets: &[PacketV2]) -> Vec<u8> {
     released
 }
 
-fn reject(session: &mut SessionV2, packets: &[PacketV2]) {
+fn reject(session: &mut Relationship, packets: &[Packet]) {
     let before = session.checkpoint();
     session.start_receive().unwrap();
     let mut failed = false;
@@ -74,10 +77,28 @@ fn reject(session: &mut SessionV2, packets: &[PacketV2]) {
     assert!(!session.has_pending());
 }
 
+fn frozen_standalone_packet() -> Vec<u8> {
+    // Read a frozen wire artifact as generic CBOR rather than retaining its
+    // removed public protocol types just to manufacture a negative fixture.
+    let transcript: ciborium::value::Value =
+        decode_strict(include_bytes!("fixtures/standalone_session.cbor"), 65536).unwrap();
+    let fields = transcript.as_map().unwrap();
+    let request = fields
+        .iter()
+        .find(|(key, _)| key.as_text() == Some("request"))
+        .unwrap()
+        .1
+        .as_array()
+        .unwrap();
+    let bytes = encode_deterministic(&request[0]).unwrap();
+    assert!(bytes.len() <= TransmissionProfile::default().limits.max_wire_packet_bytes as usize);
+    bytes
+}
+
 #[test]
 fn all_required_sizes_reconstruct_payloads_and_independent_roots() {
     for n in [1, 2, 3, 7, 8, 9, 17, 35, 100, 138] {
-        let (a, _, nodes) = transcript(TransmissionProfileV2::default());
+        let (a, _, nodes) = transcript(TransmissionProfile::default());
         let mut sender = session(&nodes, &a, 4);
         let mut receiver = session(&nodes, &a, 4);
         let chunks: Vec<_> = (0..n).map(|i| vec![i as u8; 1400]).collect();
@@ -89,7 +110,7 @@ fn all_required_sizes_reconstruct_payloads_and_independent_roots() {
                 .count(),
             1
         );
-        let mut merkle = MerkleAccumulatorV2::new(HashAlgorithm::Sha512256).unwrap();
+        let mut merkle = MerkleAccumulator::new(HashAlgorithm::Sha512256).unwrap();
         for packet in &packets {
             merkle
                 .push(&encode_deterministic(&packet.event).unwrap())
@@ -110,13 +131,13 @@ fn all_required_sizes_reconstruct_payloads_and_independent_roots() {
         assert_eq!(admit(&mut receiver, &packets), expected);
         assert_eq!(admit(&mut sender, &packets), expected);
         assert_eq!(sender.checkpoint(), receiver.checkpoint());
-        assert_eq!(sender.checkpoint().event_count, n as u64);
+        assert_eq!(sender.checkpoint().record_count, n as u64 + 1);
         assert_eq!(
             receiver.checkpoint().tip,
-            event_tip_v2(HashAlgorithm::Sha512256, &packets[n - 1].event).unwrap()
+            event_tip(HashAlgorithm::Sha512256, &packets[n - 1].event).unwrap()
         );
-        for node in receiver.nodes() {
-            assert_eq!(receiver.node(&node.tip()).unwrap().event(), node.event());
+        for record in receiver.history() {
+            assert_eq!(receiver.record(&record.id).unwrap(), record);
         }
     }
 }
@@ -124,7 +145,7 @@ fn all_required_sizes_reconstruct_payloads_and_independent_roots() {
 #[test]
 fn bidirectional_multiple_rounds_and_original_initiator_only_terminal() {
     for reverse in [false, true] {
-        let (a, b, nodes) = transcript(TransmissionProfileV2::default());
+        let (a, b, nodes) = transcript(TransmissionProfile::default());
         let (initiator, responder) = if reverse { (&b, &a) } else { (&a, &b) };
         let mut left = session(&nodes, initiator, 4);
         let mut right = session(&nodes, initiator, 4);
@@ -139,22 +160,35 @@ fn bidirectional_multiple_rounds_and_original_initiator_only_terminal() {
                 .unwrap();
             assert_eq!(admit(&mut left, &packets), admit(&mut right, &packets));
             assert_eq!(left.checkpoint(), right.checkpoint());
-            assert!(!left.checkpoint().closed);
+            assert!(!left.session().unwrap().closed());
         }
         assert!(left.create_close(responder).is_err());
         let terminal = left.create_close(initiator).unwrap();
         let included = left.checkpoint();
-        assert_eq!(terminal.commitment.history_hash, included.history_hash);
-        assert_eq!(terminal.commitment.event_count, included.event_count);
+        assert_eq!(
+            terminal.commitment.relationship_history_hash,
+            included.history_hash
+        );
+        assert_eq!(
+            terminal.commitment.packet_count,
+            included.active_session.as_ref().unwrap().packet_count
+        );
         let encoded = encode_deterministic(&terminal).unwrap();
         left.verify_and_close(&terminal).unwrap();
         right.verify_encoded_close(&encoded).unwrap();
-        assert_eq!(left.terminal(), right.terminal());
+        assert_eq!(
+            left.session().unwrap().terminal(),
+            right.session().unwrap().terminal()
+        );
         assert_eq!(left.checkpoint(), right.checkpoint());
-        assert_eq!(right.terminal().unwrap().signature, terminal.signature);
-        assert_eq!(right.checkpoint().event_count, included.event_count + 1);
-        assert!(right.checkpoint().closed);
-        assert!(right.start_receive().is_err());
+        assert_eq!(
+            right.session().unwrap().terminal().unwrap().signature,
+            terminal.signature
+        );
+        assert_eq!(right.checkpoint().record_count, included.record_count + 1);
+        assert!(right.session().unwrap().closed());
+        right.start_receive().unwrap();
+        assert!(right.abort_receive());
         assert!(right.verify_and_close(&terminal).is_err());
         assert!(left
             .build_transmission(initiator, "task", &[vec![]])
@@ -164,7 +198,7 @@ fn bidirectional_multiple_rounds_and_original_initiator_only_terminal() {
 
 #[test]
 fn payload_order_missing_duplicate_injected_and_final_authentication_fail_atomically() {
-    let (a, _, nodes) = transcript(TransmissionProfileV2::default());
+    let (a, _, nodes) = transcript(TransmissionProfile::default());
     let sender = session(&nodes, &a, 4);
     let original = sender
         .build_transmission(&a, "task", &vec![vec![10; 100]; 3])
@@ -218,11 +252,11 @@ fn payload_order_missing_duplicate_injected_and_final_authentication_fail_atomic
 
 #[test]
 fn every_commitment_field_is_reconstructed_not_trusted() {
-    let (a, _, nodes) = transcript(TransmissionProfileV2::default());
+    let (a, _, nodes) = transcript(TransmissionProfile::default());
     let original = session(&nodes, &a, 4)
         .build_transmission(&a, "task", &[vec![1], vec![2]])
         .unwrap();
-    let mutations: Vec<fn(&mut TransmissionCommitmentV2)> = vec![
+    let mutations: Vec<fn(&mut TransmissionCommitment)> = vec![
         |c| c.version = 1,
         |c| c.purpose.push('!'),
         |c| c.relationship_id[0] ^= 1,
@@ -232,7 +266,7 @@ fn every_commitment_field_is_reconstructed_not_trusted() {
         |c| c.sender[0] ^= 1,
         |c| c.receiver[0] ^= 1,
         |c| c.key_epoch += 1,
-        |c| c.kind = TransmissionKindV2::Response,
+        |c| c.kind = TransmissionKind::Response,
         |c| c.message_type.push('!'),
         |c| c.starting_tip[0] ^= 1,
         |c| c.first_counter += 1,
@@ -255,7 +289,7 @@ fn every_commitment_field_is_reconstructed_not_trusted() {
         );
         reject(&mut session(&nodes, &a, 4), &packets);
     }
-    let event_mutations: Vec<fn(&mut trax::transmission::PacketEventV2)> = vec![
+    let event_mutations: Vec<fn(&mut trax::transmission::PacketEvent)> = vec![
         |e| e.version = 1,
         |e| e.relationship_id[0] ^= 1,
         |e| e.session_id[0] ^= 1,
@@ -264,7 +298,7 @@ fn every_commitment_field_is_reconstructed_not_trusted() {
         |e| e.sender[0] ^= 1,
         |e| e.receiver[0] ^= 1,
         |e| e.key_epoch += 1,
-        |e| e.kind = TransmissionKindV2::Response,
+        |e| e.kind = TransmissionKind::Response,
         |e| e.previous_tip[0] ^= 1,
         |e| e.payload_len += 1,
     ];
@@ -275,19 +309,19 @@ fn every_commitment_field_is_reconstructed_not_trusted() {
     }
 }
 
-fn rehash_attack(packets: &mut [PacketV2], key: Option<&SigningKey>) {
+fn rehash_attack(packets: &mut [Packet], key: Option<&SigningKey>) {
     packets[0].payload[0] ^= 1;
     let mut tip = packets[0].event.previous_tip;
-    let mut merkle = MerkleAccumulatorV2::new(HashAlgorithm::Sha512256).unwrap();
+    let mut merkle = MerkleAccumulator::new(HashAlgorithm::Sha512256).unwrap();
     for packet in packets.iter_mut() {
         packet.event.previous_tip = tip;
-        packet.event.payload_hash = hash_v2(
+        packet.event.payload_hash = hash_domain(
             HashAlgorithm::Sha512256,
-            b"TRAX:PAYLOAD:V2\0",
+            b"TRAX:PAYLOAD:V3\0",
             &[&packet.payload],
         )
         .unwrap();
-        tip = event_tip_v2(HashAlgorithm::Sha512256, &packet.event).unwrap();
+        tip = event_tip(HashAlgorithm::Sha512256, &packet.event).unwrap();
         merkle
             .push(&encode_deterministic(&packet.event).unwrap())
             .unwrap();
@@ -296,7 +330,7 @@ fn rehash_attack(packets: &mut [PacketV2], key: Option<&SigningKey>) {
     seal.commitment.merkle_root = merkle.root().unwrap();
     seal.commitment.final_event_tip = tip;
     if let Some(key) = key {
-        let mut bytes = b"TRAX:TRANSMISSION:V2\0".to_vec();
+        let mut bytes = b"TRAX:TRANSMISSION:V3\0".to_vec();
         bytes.extend_from_slice(&encode_deterministic(&seal.commitment).unwrap());
         seal.signature = ed25519_sign(key, &bytes);
     }
@@ -304,7 +338,7 @@ fn rehash_attack(packets: &mut [PacketV2], key: Option<&SigningKey>) {
 
 #[test]
 fn network_attacker_can_rehash_every_link_but_cannot_authenticate_as_peer() {
-    let (a, b, nodes) = transcript(TransmissionProfileV2::default());
+    let (a, b, nodes) = transcript(TransmissionProfile::default());
     let c = SigningKey::from_bytes(&[99; 32]);
     let original = session(&nodes, &a, 4)
         .build_transmission(&a, "task", &vec![vec![1; 100]; 17])
@@ -319,8 +353,8 @@ fn network_attacker_can_rehash_every_link_but_cannot_authenticate_as_peer() {
 }
 
 #[test]
-fn replays_cross_session_cross_direction_and_legacy_proofs_are_rejected() {
-    let (a, b, nodes) = transcript(TransmissionProfileV2::default());
+fn replays_cross_session_cross_direction_and_foreign_proofs_are_rejected() {
+    let (a, b, nodes) = transcript(TransmissionProfile::default());
     let mut receiver = session(&nodes, &a, 4);
     let original = receiver.build_transmission(&a, "task", &[vec![1]]).unwrap();
     admit(&mut receiver, &original);
@@ -334,22 +368,9 @@ fn replays_cross_session_cross_direction_and_legacy_proofs_are_rejected() {
     let mut old = session(&nodes, &a, 4);
     old.start_receive().unwrap();
     assert!(old
-        .stage_encoded_packet(
-            &encode_deterministic(&trax::PostGenesisEventV1 {
-                version: 1,
-                session_id: [0; 32],
-                lineage_key_id: [0; 32],
-                receiver_id: [0; 32],
-                segment_index: 0,
-                counter: 1,
-                previous_tip: [0; 32],
-                content_hash: [0; 32],
-                payload_hash: [0; 32],
-            })
-            .unwrap()
-        )
+        .stage_encoded_packet(&frozen_standalone_packet())
         .is_err());
-    assert_eq!(old.checkpoint().event_count, 0);
+    assert_eq!(old.checkpoint().record_count, 0);
     // Original history remains usable after rejecting a replay.
     let response = receiver
         .build_transmission(&b, "result", &[vec![2]])
@@ -359,92 +380,33 @@ fn replays_cross_session_cross_direction_and_legacy_proofs_are_rejected() {
 }
 
 #[test]
-fn valid_legacy_window_and_graph_proofs_cannot_substitute_for_v2_packets() {
-    use trax::crypto::hash32;
-    use trax::dag::{
-        create_segment_seal, event_tip, lineage_key_id, verify_segment_proof_intrinsic,
-    };
-    use trax::graph::{participant_id, PairDag, PairGenesis};
-    use trax::{PostGenesisEventV1, ProtocolConfig, SegmentConfig, SegmentProof, SigningAlgorithm};
-    let (a, b, nodes) = transcript(TransmissionProfileV2::default());
-    let mut previous_tip = hash32(b"legacy genesis");
-    let events: Vec<_> = (1..=8)
-        .map(|counter| {
-            let event = PostGenesisEventV1 {
-                version: 1,
-                session_id: hash32(b"legacy session"),
-                lineage_key_id: lineage_key_id(&a.verifying_key()),
-                receiver_id: hash32(b"receiver"),
-                segment_index: 0,
-                counter,
-                previous_tip,
-                content_hash: hash32(b"content"),
-                payload_hash: hash32(b"payload"),
-            };
-            previous_tip = event_tip(&event).unwrap();
-            event
-        })
-        .collect();
-    let config = SegmentConfig::new(8).unwrap();
-    let seal = create_segment_seal(config, &a, &events).unwrap();
-    let mut proof = SegmentProof { events, seal };
-    verify_segment_proof_intrinsic(config, &proof, &a.verifying_key()).unwrap();
+fn frozen_foreign_schema_and_signing_domains_cannot_substitute() {
+    let (a, _, nodes) = transcript(TransmissionProfile::default());
     let mut receiver = session(&nodes, &a, 4);
     let before = receiver.checkpoint();
     receiver.start_receive().unwrap();
     assert!(receiver
-        .stage_encoded_packet(&encode_deterministic(&proof).unwrap())
+        .stage_encoded_packet(&frozen_standalone_packet())
         .is_err());
     assert_eq!(receiver.checkpoint(), before);
-    let mut packets = receiver.build_transmission(&a, "task", &[vec![1]]).unwrap();
-    let new_signature = packets[0]
-        .authentication
-        .as_ref()
-        .unwrap()
-        .signature
-        .clone();
-    packets[0].authentication.as_mut().unwrap().signature = proof.seal.signature.clone();
-    reject(&mut receiver, &packets);
-    proof.seal.signature = new_signature;
-    assert!(verify_segment_proof_intrinsic(config, &proof, &a.verifying_key()).is_err());
-    assert!(decode_strict::<trax::SegmentSealV1>(
-        &encode_deterministic(packets[0].authentication.as_ref().unwrap()).unwrap(),
-        4096
-    )
-    .is_err());
-
-    // The newer shared fixed-cadence graph also uses numeric version 2. Its
-    // distinct schemas and signing domains still cannot cross into this V2.
-    let config =
-        ProtocolConfig::new(8, SigningAlgorithm::Ed25519, HashAlgorithm::Sha512256).unwrap();
-    let genesis =
-        PairGenesis::new(config, [88; 32], &a.verifying_key(), &b.verifying_key()).unwrap();
-    let mut legacy = PairDag::from_verified_genesis(config, genesis).unwrap();
-    let mut pending = legacy.begin_segment();
-    for _ in 0..8 {
-        pending
-            .append(
-                participant_id(&a.verifying_key().to_bytes()),
-                legacy.main_branch(),
-                vec![1],
-            )
-            .unwrap();
+    let original = receiver.build_transmission(&a, "task", &[vec![1]]).unwrap();
+    for domain in [
+        b"TRAX:TRANSMISSION:V2\0".as_slice(),
+        b"TRAX:SEGMENT:SEAL:V1\0",
+        b"TRAX:GRAPH:CHECKPOINT:V2\0",
+    ] {
+        let mut packets = original.clone();
+        let seal = packets[0].authentication.as_mut().unwrap();
+        let mut bytes = domain.to_vec();
+        bytes.extend_from_slice(&encode_deterministic(&seal.commitment).unwrap());
+        seal.signature = ed25519_sign(&a, &bytes);
+        reject(&mut receiver, &packets);
     }
-    let graph_proof = pending
-        .seal(participant_id(&a.verifying_key().to_bytes()), &a)
-        .unwrap();
-    legacy.verify_and_commit(&graph_proof).unwrap();
-    receiver.start_receive().unwrap();
-    assert!(receiver
-        .stage_encoded_packet(&encode_deterministic(&graph_proof).unwrap())
-        .is_err());
-    assert_eq!(receiver.checkpoint(), before);
-    assert!(!receiver.has_pending());
 }
 
 #[test]
 fn closure_failures_never_modify_committed_history() {
-    let (a, b, nodes) = transcript(TransmissionProfileV2::default());
+    let (a, b, nodes) = transcript(TransmissionProfile::default());
     let mut ready = session(&nodes, &a, 4);
     assert!(ready.create_close(&a).is_err());
     for key in [&a, &b] {
@@ -455,7 +417,7 @@ fn closure_failures_never_modify_committed_history() {
     let before = ready.checkpoint();
     let mut bad = Vec::new();
     let mut t = terminal.clone();
-    t.commitment.history_hash[0] ^= 1;
+    t.commitment.relationship_history_hash[0] ^= 1;
     bad.push(t);
     let mut t = terminal.clone();
     t.commitment.final_data_tip[0] ^= 1;
@@ -467,7 +429,7 @@ fn closure_failures_never_modify_committed_history() {
     t.commitment.last_counter += 1;
     bad.push(t);
     let mut t = terminal.clone();
-    t.commitment.event_count += 1;
+    t.commitment.packet_count += 1;
     bad.push(t);
     let mut t = terminal.clone();
     t.commitment.terminal_counter += 1;
@@ -482,7 +444,7 @@ fn closure_failures_never_modify_committed_history() {
     t.signature[0] ^= 1;
     bad.push(t);
     let mut t = terminal.clone();
-    let mut bytes = b"TRAX:SESSION:CLOSE:V2\0".to_vec();
+    let mut bytes = b"TRAX:SESSION:CLOSE:V3\0".to_vec();
     bytes.extend_from_slice(&encode_deterministic(&t.commitment).unwrap());
     t.signature = ed25519_sign(&b, &bytes);
     bad.push(t);
@@ -500,7 +462,7 @@ fn closure_failures_never_modify_committed_history() {
 
 #[test]
 fn bounded_resources_timeout_cleanup_and_strict_wire_decode() {
-    let mut profile = TransmissionProfileV2::default();
+    let mut profile = TransmissionProfile::default();
     profile.limits.max_packets = 3;
     profile.limits.max_payload_bytes = 2000;
     profile.limits.timeout_ms = 2;
@@ -546,15 +508,15 @@ fn bounded_resources_timeout_cleanup_and_strict_wire_decode() {
     let valid = encode_deterministic(&packets[0]).unwrap();
     let mut tagged = vec![0xd9, 0x03, 0xe7];
     tagged.extend_from_slice(&valid);
-    assert!(decode_strict::<PacketV2>(&tagged, 4096).is_err());
+    assert!(decode_strict::<Packet>(&tagged, 4096).is_err());
     let mut trailing = valid;
     trailing.push(0);
-    assert!(decode_strict::<PacketV2>(&trailing, 4096).is_err());
+    assert!(decode_strict::<Packet>(&trailing, 4096).is_err());
 }
 
 #[test]
 fn wire_budget_accounts_for_final_signature_and_fragmentation_reduces_data() {
-    let mut profile = TransmissionProfileV2::default();
+    let mut profile = TransmissionProfile::default();
     profile.limits.max_wire_packet_bytes = 1800;
     let (a, _, nodes) = transcript(profile);
     let mut receiver = session(&nodes, &a, 4);
@@ -573,9 +535,51 @@ fn wire_budget_accounts_for_final_signature_and_fragmentation_reduces_data() {
 }
 
 #[test]
+fn fragmentation_separates_start_context_and_final_seal_with_exact_wire_budgets() {
+    for budget in [1150, 1400, 1800, 4096] {
+        let mut profile = TransmissionProfile::default();
+        profile.limits.max_wire_packet_bytes = budget;
+        profile.limits.max_packet_payload_bytes = budget.min(1400);
+        let (a, _, nodes) = transcript(profile);
+        for size in [0, 1, 2, 23, 24, 255, 256, 14000, 300000] {
+            let mut receiver = session(&nodes, &a, 4);
+            let payload = vec![7; size];
+            let packets = receiver
+                .fragment_transmission(&a, "document", &payload)
+                .unwrap();
+            assert!(packets
+                .iter()
+                .all(|p| encode_deterministic(p).unwrap().len() <= budget as usize));
+            assert_eq!(
+                packets
+                    .iter()
+                    .filter(|p| p.authentication.is_some())
+                    .count(),
+                1
+            );
+            assert!(packets[0].session_start.is_some());
+            assert!(packets[1..].iter().all(|p| p.session_start.is_none()));
+            if size > 0 {
+                assert!(!packets.last().unwrap().payload.is_empty());
+            }
+            assert_eq!(admit(&mut receiver, &packets), payload);
+        }
+    }
+    let mut profile = TransmissionProfile::default();
+    profile.limits.max_wire_packet_bytes = 900;
+    profile.limits.max_packet_payload_bytes = 900;
+    let (a, _, nodes) = transcript(profile);
+    let relationship = session(&nodes, &a, 4);
+    assert!(relationship
+        .fragment_transmission(&a, "document", &[1])
+        .is_err());
+    assert_eq!(relationship.checkpoint().record_count, 0);
+}
+
+#[test]
 fn arbitrary_bounded_mutations_never_release_unauthenticated_payload() {
     use rand::{Rng, SeedableRng};
-    let (a, _, nodes) = transcript(TransmissionProfileV2::default());
+    let (a, _, nodes) = transcript(TransmissionProfile::default());
     let sender = session(&nodes, &a, 4);
     let original = sender
         .build_transmission(&a, "task", &[vec![0; 32], vec![1; 32], vec![2; 32]])

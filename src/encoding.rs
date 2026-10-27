@@ -4,12 +4,7 @@
 //! encoded key. Duplicate encoded keys are rejected. The decoder accepts exactly
 //! one item and requires its bytes to match this deterministic representation.
 //!
-//! This replaces the prototype's declaration/insertion-order map encoding. Even
-//! existing V1 structs therefore have different bytes, hashes, and signing
-//! transcripts; old prototype proofs must not be carried into this profile.
 use crate::errors::TraxError;
-use crate::types::ProtectedHeaders;
-use ciborium::de;
 use ciborium::ser;
 use ciborium::value::Value;
 
@@ -19,21 +14,8 @@ pub fn encode_deterministic<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, T
     encode_value(&value)
 }
 
-pub fn decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T, TraxError> {
-    let mut remaining = data;
-    let mut value: Value = de::from_reader(&mut remaining).map_err(|_| TraxError::Cbor)?;
-    if !remaining.is_empty() {
-        return Err(TraxError::Cbor);
-    }
-    normalize(&mut value)?;
-    if encode_value(&value)? != data {
-        return Err(TraxError::Cbor);
-    }
-    value.deserialized().map_err(|_| TraxError::Cbor)
-}
-
 /// Strict protocol decoding with a byte cap and an exact typed round trip.
-/// Unlike generic CBOR values, V2 schemas do not admit discarded semantic tags.
+/// Protocol schemas reject semantic tags discarded by typed deserialization.
 pub fn decode_strict<T: serde::de::DeserializeOwned + serde::Serialize>(
     data: &[u8],
     max_bytes: usize,
@@ -95,16 +77,4 @@ fn normalize(value: &mut Value) -> Result<(), TraxError> {
         _ => {}
     }
     Ok(())
-}
-
-/// COSE signing is not implemented by this helper. Admission envelopes and
-/// segment seals use their explicit Ed25519 signing APIs instead.
-pub fn cose_sign1(
-    _headers: &ProtectedHeaders,
-    _payload: &[u8],
-    _key: &[u8],
-) -> Result<Vec<u8>, TraxError> {
-    Err(TraxError::InvalidInput(
-        "COSE_Sign1 signing is not implemented",
-    ))
 }
